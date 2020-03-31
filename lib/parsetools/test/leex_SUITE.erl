@@ -366,6 +366,26 @@ syntax(Config) when is_list(Config) ->
                                 {illegal_char,
                                  "\\x{333333333333333333333333}"}}}]}],[]} =
         leex:file(Filename, Ret),
+
+    ?line ok = file:write_file("file.inc", 
+                               <<"D  = [0-9]\n">>),
+    ?line ok = file:write_file(Filename,
+                               <<"Definitions.\n"
+                                 "include \"file.inc\"\n"
+                                 "Rules.\n"
+                                 "[b-a] : token.\n">>),
+    ?line {error,[{_,[{4,leex,{regexp,{char_class,"b-a"}}}]}],[]} =
+        leex:file(Filename, Ret),
+
+    ?line ok = file:write_file("file.inc", 
+                               <<"[{\"D\", \"[0-9]\"}].\n">>),
+    ?line ok = file:write_file(Filename,
+                               <<"Definitions.\n"
+                                 "consult \"file.inc\"\n"
+                                 "Rules.\n"
+                                 "[b-a] : token.\n">>),
+    ?line {error,[{_,[{4,leex,{regexp,{char_class,"b-a"}}}]}],[]} =
+        leex:file(Filename, Ret),
     ok.
 
 

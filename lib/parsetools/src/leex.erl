@@ -434,10 +434,40 @@ parse_defs(_, {eof,L}, St) ->
 
 parse_defs(Ifile, {ok,Chars,L}=Line, Ms, St) ->
     %% This little beauty matches out a macro definition, RE's are so clear.
-    MS = "^[ \t]*([A-Z_][A-Za-z0-9_]*)[ \t]*=[ \t]*([^ \t\r\n]*)[ \t\r\n]*\$",
+    MS = "^[ \t]*([A-Z_][A-Za-z0-9_]*)[ \t]*=[ \t]*([^ \t\r\n]*)[ \t\r\n]*|[ \t]*([a-z]+)[ \t]+\"([^\"]+)\"\$",
     case re:run(Chars, MS, [{capture,all_but_first,list},unicode]) of
+        {match,[[], [],"include", IncFilename]} -> % include Leex definitions from another file
+            io:fwrite("include ~p\n", [IncFilename]),
+            case file:open(IncFilename, [read]) of
+                {ok, IncFile} ->
+                    Sti = #leex{encoding = epp:set_encoding(IncFile)},
+                    try
+                        case parse_defs(IncFile, {ok,nextline(IncFile, 0, Sti), 0}, [], Sti) of
+                            {ok,_,IncMs,_} ->
+                                io:fwrite("IncMs ~p\n", [IncMs]),
+                                parse_defs(Ifile, nextline(Ifile, L, St), IncMs ++ [Ms], St) ;
+                            _ -> 
+                                add_error({L,leex,invalid_defs}, St)
+                        end
+                    after ok = file:close(IncFile)
+                    end
+            end;
+        {match,[[], [], "consult",IncFile]} -> % consult Leex definitions from another file as list of {Name, Def} tuples
+            io:fwrite("consult ~p\n", [IncFile]),
+            case file:consult(IncFile) of
+                {error, Reason} -> 
+                    add_error({L,leex,{file_error, Reason}}, St);
+                {ok, List} when is_list(List) -> 
+                    % Check it is a valid list of tuples
+                    case lists:all(fun(X) -> case X of {N, D} when is_list(N), is_list(D)-> true; _ -> false end end, List) of
+                        true -> 
+                            parse_defs(Ifile, nextline(Ifile, L, St), List ++ [Ms], St);
+                        false ->
+                            add_error({L,leex,invalid_defs}, St)
+                    end
+            end;
         {match,[Name,Def]} ->
-            %%io:fwrite("~p = ~p\n", [Name,Def]),
+            io:fwrite("~p = ~p\n", [Name,Def]),
             parse_defs(Ifile, nextline(Ifile, L, St), [{Name,Def}|Ms], St);
         _ -> {ok,Line,Ms,St}                    % Anything else
     end;
