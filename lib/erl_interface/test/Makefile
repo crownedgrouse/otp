@@ -1,7 +1,7 @@
 #
 # %CopyrightBegin%
 # 
-# Copyright Ericsson AB 1997-2016. All Rights Reserved.
+# Copyright Ericsson AB 1997-2020. All Rights Reserved.
 # 
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -33,6 +33,7 @@ MODULES= \
 	ei_format_SUITE \
 	ei_print_SUITE \
 	ei_tmo_SUITE \
+	erl_call_SUITE \
 	erl_connect_SUITE \
 	erl_global_SUITE \
 	erl_eterm_SUITE \

@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2005-2018. All Rights Reserved.
+%% Copyright Ericsson AB 2005-2020. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -32,6 +32,8 @@
 
 -include_lib("common_test/include/ct.hrl").
 -include_lib("kernel/include/file.hrl").
+
+-define(PRIM_FILE, prim_file).
 
 init_per_testcase(_Case, Config) ->
     Config.
@@ -77,9 +79,11 @@ wildcard_one(Config) when is_list(Config) ->
     do_wildcard_1(Dir,
 		  fun(Wc) ->
 			  L = filelib:wildcard(Wc),
+			  L = filelib:wildcard(disable_prefix_opt(Wc)),
 			  L = filelib:wildcard(Wc, erl_prim_loader),
 			  L = filelib:wildcard(Wc, "."),
 			  L = filelib:wildcard(Wc, Dir),
+			  L = filelib:wildcard(disable_prefix_opt(Wc), Dir),
 			  L = filelib:wildcard(Wc, Dir++"/.")
 		  end),
     file:set_cwd(OldCwd),
@@ -117,10 +121,18 @@ wcc(Wc, Error) ->
     {'EXIT',{{badpattern,Error},
 	     [{filelib,wildcard,2,_}|_]}} = (catch filelib:wildcard(Wc, ".")).
 
+disable_prefix_opt([C|Wc]) when $a =< C, C =< $z; C =:= $@ ->
+    %% There is an optimization for patterns that have a literal prefix
+    %% (such as "lib/compiler/ebin/*"). Test that we'll get the same result
+    %% if we disable that optimization.
+    [$[, C, $] | Wc];
+disable_prefix_opt(Wc) ->
+    Wc.
+
 do_wildcard_1(Dir, Wcf0) ->
     do_wildcard_2(Dir, Wcf0),
     Wcf = fun(Wc0) ->
-		  Wc = filename:join(Dir, Wc0),
+		  Wc = Dir ++ "/" ++ Wc0,
 		  L = Wcf0(Wc),
 		  [subtract_dir(N, Dir) || N <- L]
 	  end,
@@ -268,8 +280,61 @@ do_wildcard_9(Dir, Wcf) ->
     %% Cleanup.
     del(Files),
     [ok = file:del_dir(D) || D <- lists:reverse(Dirs)],
-    ok.
+    do_wildcard_10(Dir, Wcf).
 
+%% ERL-451/OTP-14577: Escape characters using \\.
+do_wildcard_10(Dir, Wcf) ->
+    All0 = ["{abc}","abc","def","---","z--","@a,b","@c"],
+    All = case os:type() of
+              {unix,_} ->
+                  %% '?' is allowed in file names on Unix, but
+                  %% not on Windows.
+                  ["?q"|All0];
+              _ ->
+                  All0
+          end,
+    Files = mkfiles(lists:reverse(All), Dir),
+
+    ["{abc}"] = Wcf("\\{a*"),
+    ["{abc}"] = Wcf("\\{abc}"),
+    ["abc","def","z--"] = Wcf("[a-z]*"),
+    ["---","abc","z--"] = Wcf("[a\\-z]*"),
+    ["@a,b","@c"] = Wcf("@{a\\,b,c}"),
+    ["@c"] = Wcf("@{a,b,c}"),
+
+    case os:type() of
+        {unix,_} ->
+            ["?q"] = Wcf("\\?q");
+        _ ->
+            [] = Wcf("\\?q")
+    end,
+
+    del(Files),
+    wildcard_11(Dir, Wcf).
+
+%% ERL-ERL-1029/OTP-15987: Fix problems with "@/.." and ".." in general.
+wildcard_11(Dir, Wcf) ->
+    Dirs0 = ["@","@dir","dir@"],
+    Dirs = [filename:join(Dir, D) || D <- Dirs0],
+    _ = [ok = file:make_dir(D) || D <- Dirs],
+    Files0 = ["@a","b@","x","y","z"],
+    Files = mkfiles(Files0, Dir),
+
+    ["@","@a","@dir","b@","dir@","x","y","z"] = Wcf("*"),
+    ["@"] = Wcf("@"),
+    ["@","@a","@dir"] = Wcf("@*"),
+    ["@/..","@dir/.."] = Wcf("@*/.."),
+    ["@/../@","@/../@a","@/../@dir",
+     "@dir/../@","@dir/../@a","@dir/../@dir"] = Wcf("@*/../@*"),
+
+    %% Non-directories followed by "/.." should not match any files.
+    [] = Wcf("@a/.."),
+    [] = Wcf("x/.."),
+
+    %% Cleanup.
+    del(Files),
+    [ok = file:del_dir(D) || D <- Dirs],
+    ok.
 
 fold_files(Config) when is_list(Config) ->
     Dir = filename:join(proplists:get_value(priv_dir, Config), "fold_files"),
@@ -417,10 +482,10 @@ wildcard_symlink(Config) when is_list(Config) ->
 						erl_prim_loader)),
 	    ["sub","symlink"] =
 		basenames(Dir, filelib:wildcard(filename:join(Dir, "*"),
-						prim_file)),
+						?PRIM_FILE)),
 	    ["symlink"] =
 		basenames(Dir, filelib:wildcard(filename:join(Dir, "symlink"),
-						prim_file)),
+						?PRIM_FILE)),
 	    ok = file:delete(AFile),
 	    %% The symlink should still be visible even when its target
 	    %% has been deleted.
@@ -436,10 +501,10 @@ wildcard_symlink(Config) when is_list(Config) ->
 						erl_prim_loader)),
 	    ["sub","symlink"] =
 		basenames(Dir, filelib:wildcard(filename:join(Dir, "*"),
-						prim_file)),
+						?PRIM_FILE)),
 	    ["symlink"] =
 		basenames(Dir, filelib:wildcard(filename:join(Dir, "symlink"),
-						prim_file)),
+						?PRIM_FILE)),
 	    ok
     end.
 
@@ -468,17 +533,17 @@ is_file_symlink(Config) ->
 	ok ->
 	    true = filelib:is_dir(DirAlias),
 	    true = filelib:is_dir(DirAlias, erl_prim_loader),
-	    true = filelib:is_dir(DirAlias, prim_file),
+	    true = filelib:is_dir(DirAlias, ?PRIM_FILE),
 	    true = filelib:is_file(DirAlias),
 	    true = filelib:is_file(DirAlias, erl_prim_loader),
-	    true = filelib:is_file(DirAlias, prim_file),
+	    true = filelib:is_file(DirAlias, ?PRIM_FILE),
 	    ok = file:make_symlink(AFile,FileAlias),
 	    true = filelib:is_file(FileAlias),
 	    true = filelib:is_file(FileAlias, erl_prim_loader),
-	    true = filelib:is_file(FileAlias, prim_file),
+	    true = filelib:is_file(FileAlias, ?PRIM_FILE),
 	    true = filelib:is_regular(FileAlias),
 	    true = filelib:is_regular(FileAlias, erl_prim_loader),
-	    true = filelib:is_regular(FileAlias, prim_file),
+	    true = filelib:is_regular(FileAlias, ?PRIM_FILE),
 	    ok
     end.
 
@@ -499,11 +564,11 @@ file_props_symlink(Config) ->
 	    {_,_} = LastMod = filelib:last_modified(AFile),
 	    LastMod = filelib:last_modified(Alias),
 	    LastMod = filelib:last_modified(Alias, erl_prim_loader),
-	    LastMod = filelib:last_modified(Alias, prim_file),
+	    LastMod = filelib:last_modified(Alias, ?PRIM_FILE),
 	    FileSize = filelib:file_size(AFile),
 	    FileSize = filelib:file_size(Alias),
 	    FileSize = filelib:file_size(Alias, erl_prim_loader),
-	    FileSize = filelib:file_size(Alias, prim_file)
+	    FileSize = filelib:file_size(Alias, ?PRIM_FILE)
     end.
 
 find_source(Config) when is_list(Config) ->

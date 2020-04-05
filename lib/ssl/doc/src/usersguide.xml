@@ -4,7 +4,7 @@
 <part xmlns:xi="http://www.w3.org/2001/XInclude">
   <header>
     <copyright>
-      <year>2000</year><year>2016</year>
+      <year>2000</year><year>2020</year>
       <holder>Ericsson AB. All Rights Reserved.</holder>
     </copyright>
     <legalnotice>
@@ -38,6 +38,7 @@
   <xi:include href="ssl_protocol.xml"/>
   <xi:include href="using_ssl.xml"/>
   <xi:include href="ssl_distribution.xml"/>
+  <xi:include href="standards_compliance.xml"/>
 </part>
 
 

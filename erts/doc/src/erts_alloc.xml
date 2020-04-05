@@ -4,7 +4,7 @@
 <cref>
   <header>
     <copyright>
-      <year>2002</year><year>2017</year>
+      <year>2002</year><year>2018</year>
       <holder>Ericsson AB. All Rights Reserved.</holder>
     </copyright>
     <legalnotice>
@@ -68,8 +68,7 @@
        fixed size data types.</item>
       <tag><c>exec_alloc</c></tag>
       <item>Allocator used by the <seealso marker="hipe:HiPE_app"><c>HiPE</c></seealso>
-        application for native executable code on specific architectures
-        (x86_64).</item>
+        application for native executable code.</item>
       <tag><c>std_alloc</c></tag>
       <item>Allocator used for most memory blocks not allocated through any of
         the other allocators described above.</item>
@@ -87,9 +86,9 @@
         the number of system calls made.</item>
     </taglist>
 
-    <p><c>sys_alloc</c> and <c>literal_alloc</c> are always enabled and
-      cannot be disabled. <c>exec_alloc</c> is only available if it is needed
-      and cannot be disabled. <c>mseg_alloc</c> is always enabled if it is
+    <p><c>sys_alloc</c>, <c>literal_alloc</c> and <c>temp_alloc</c> are always
+      enabled and cannot be disabled. <c>exec_alloc</c> is only available if it
+      is needed and cannot be disabled. <c>mseg_alloc</c> is always enabled if it is
       available and an allocator that uses it is enabled. All other
       allocators can be <seealso marker="#M_e">enabled or disabled</seealso>.
       By default all allocators are enabled.
@@ -488,11 +487,10 @@
             utilization value used. Once a carrier is abandoned, no new
             allocations are made in it. When an allocator instance gets an
             increased multiblock carrier need, it first tries to fetch an
-            abandoned carrier from an allocator instance of the same
-            allocator type. If no abandoned carrier can be fetched, it
-            creates a new empty carrier. When an abandoned carrier has been
-            fetched, it will function as an ordinary carrier. This feature has
-            special requirements on the
+            abandoned carrier from another allocator instance. If no abandoned
+            carrier can be fetched, it creates a new empty carrier. When an
+            abandoned carrier has been fetched, it will function as an ordinary
+            carrier. This feature has special requirements on the
             <seealso marker="#M_as">allocation strategy</seealso> used. Only
             the strategies <c>aoff</c>, <c>aoffcbf</c>, <c>aoffcaobf</c>,
 	    <c>ageffcaoff</c>m, <c>ageffcbf</c> and <c>ageffcaobf</c>
@@ -560,6 +558,20 @@
             than this threshold, otherwise the carrier is shrunk.
             See also <seealso marker="#M_rsbcst"><c>rsbcst</c></seealso>.</p>
         </item>
+        <tag><marker id="M_atags"/><c><![CDATA[+M<S>atags true|false]]></c></tag>
+        <item>
+          <p>Adds a small tag to each allocated block that contains basic
+            information about what it is and who allocated it. Use the
+            <seealso marker="tools:instrument"><c>instrument</c></seealso>
+            module to inspect this information.</p>
+
+          <p>The runtime overhead is one word per allocation when enabled. This
+            may change at any time in the future.</p>
+
+          <p>The default is <c>true</c> for <c>binary_alloc</c> and
+            <c>driver_alloc</c>, and <c>false</c> for the other allocator
+            types.</p>
+        </item>
         <tag><marker id="M_e"/><c><![CDATA[+M<S>e true|false]]></c></tag>
         <item>
           <p>Enables allocator <c><![CDATA[<S>]]></c>.</p>
@@ -571,7 +583,7 @@
             carriers are decided in section
             <seealso marker="#mseg_mbc_sizes">
             The alloc_util Framework</seealso>. On
-            32-bit Unix style OS this limit cannot be set &gt; 128 MB.</p>
+            32-bit Unix style OS this limit cannot be set &gt; 64 MB.</p>
         </item>
         <tag><marker id="M_mbcgs"/><c><![CDATA[+M<S>mbcgs <ratio>]]></c></tag>
         <item>
@@ -723,37 +735,14 @@
     </section>
 
     <section>
-      <title>Special Flag for exec_alloc</title>
-      <taglist>
-        <tag><marker id="MXscs"/><c><![CDATA[+MXscs <size in MB>]]></c></tag>
-        <item>
-          <p><c>exec_alloc</c> super carrier size (in MB). The amount of
-            <em>virtual</em> address space reserved for native executable code
-            used by the <seealso marker="hipe:HiPE_app"><c>HiPE</c></seealso> application
-            on specific architectures (x86_64). Defaults to <c>512</c>.</p>
-        </item>
-      </taglist>
-    </section>
-
-    <section>
       <title>Instrumentation Flags</title>
       <taglist>
-        <tag><marker id="Mim"/><c>+Mim true|false</c></tag>
+        <tag><c>+M&lt;S&gt;atags</c></tag>
         <item>
-          <p>A map over current allocations is kept by the emulator.
-            The allocation map can be retrieved through module
-            <seealso marker="tools:instrument">
-            <c>instrument(3)</c></seealso>. <c>+Mim true</c>
-            implies <c>+Mis true</c>. <c>+Mim true</c> is the same as flag
-            <seealso marker="erl#instr"><c>-instr</c></seealso> in 
-            <c>erl(1)</c>.</p>
-        </item>
-        <tag><marker id="Mis"/><c>+Mis true|false</c></tag>
-        <item>
-          <p>Status over allocated memory is kept by the emulator.
-            The allocation status can be retrieved through module
-            <seealso marker="tools:instrument">
-            <c>instrument(3)</c></seealso>.</p>
+          <p>Adds a small tag to each allocated block that contains basic
+            information about what it is and who allocated it. See
+            <seealso marker="#M_atags"><c>+M&lt;S&gt;atags</c></seealso> for a
+            more complete description.</p>
         </item>
         <tag><marker id="Mit"/><c>+Mit X</c></tag>
         <item>

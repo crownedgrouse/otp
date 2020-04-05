@@ -1,7 +1,7 @@
 %% 
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 2004-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2004-2020. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -32,7 +32,7 @@
 	 %% Management API
 	 start/0, start/1, 
 	 start_link/0, start_link/1, 
-	 stop/0, 
+	 stop/0, stop/1,
 
 	 monitor/0, demonitor/1, 
 	 notify_started/1, cancel_notify_started/1, 
@@ -89,8 +89,9 @@
 	 system_start_time/0,
 	 sys_up_time/0,
 
-	 info/0, 
-	 verbosity/2 
+	 info/0, info/1,
+	 verbosity/2,
+         restart/1
 	]).
 
 -export([format_reason/1, format_reason/2]).
@@ -196,7 +197,12 @@ start(Opts) ->
     ok.
 
 stop() ->
-    snmpm_supervisor:stop().
+    stop(0).
+
+stop(Timeout) when (Timeout =:= infinity) orelse
+                   (is_integer(Timeout) andalso (Timeout >= 0)) ->
+    snmpm_supervisor:stop(Timeout).
+
 
 
 monitor() ->
@@ -292,6 +298,9 @@ oid_to_type(Oid) ->
 info() ->
     snmpm_server:info().
 
+info(Key) ->
+    proplists:get_value(Key, info(), {error, not_found}).
+
 
 %% -- Verbosity -- 
 
@@ -309,6 +318,16 @@ verbosity(all, V) ->
     snmpm_server:verbosity(V),
     snmpm_server:verbosity(net_if, V),
     snmpm_server:verbosity(note_store, V).
+
+
+%% -- Restart -- 
+
+%% Restart various component processes in the manager
+%% Note that the effects of this is diffiult to
+%% predict, so it should be use with *caution*!
+
+restart(net_if = What) ->
+    snmpm_server:restart(What).
 
 
 %% -- Users --

@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1997-2018. All Rights Reserved.
+%% Copyright Ericsson AB 1997-2020. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -281,6 +281,14 @@ do_wildcard_2([], _, Result, _Mod) ->
 
 do_wildcard_3(Base, [[double_star]|Rest], Result, Mod) ->
     do_double_star(".", [Base], Rest, Result, Mod, true);
+do_wildcard_3(Base, [".."|Rest], Result, Mod) ->
+    case do_is_dir(Base, Mod) of
+        true ->
+            Matches = [filename:join(Base, "..")],
+            do_wildcard_2(Matches, Rest, Result, Mod);
+        false ->
+            Result
+    end;
 do_wildcard_3(Base0, [Pattern|Rest], Result, Mod) ->
     case do_list_dir(Base0, Mod) of
 	{ok, Files} ->
@@ -365,11 +373,18 @@ do_list_dir(Dir, Mod) ->     eval_list_dir(Dir, Mod).
 	    
 %%% Compiling a wildcard.
 
+
+%% Define characters used for escaping a \.
+-define(ESCAPE_PREFIX, $@).
+-define(ESCAPE_CHARACTER, [?ESCAPE_PREFIX,$e]).
+-define(ESCAPED_ESCAPE_PREFIX, [?ESCAPE_PREFIX,?ESCAPE_PREFIX]).
+
 %% Only for debugging.
 compile_wildcard(Pattern) when is_list(Pattern) ->
     {compiled_wildcard,?HANDLE_ERROR(compile_wildcard(Pattern, "."))}.
 
-compile_wildcard(Pattern, Cwd0) ->
+compile_wildcard(Pattern0, Cwd0) ->
+    Pattern = convert_escapes(Pattern0),
     [Root|Rest] = filename:split(Pattern),
     case filename:pathtype(Root) of
 	relative ->
@@ -380,14 +395,28 @@ compile_wildcard(Pattern, Cwd0) ->
     end.
 
 compile_wildcard_2([Part|Rest], Root) ->
-    case compile_part(Part) of
-	Part ->
-	    compile_wildcard_2(Rest, compile_join(Root, Part));
-	Pattern ->
-	    compile_wildcard_3(Rest, [Pattern,Root])
+    Pattern = compile_part(Part),
+    case is_literal_pattern(Pattern) of
+        true ->
+            %% Add this literal pattern to the literal pattern prefix.
+            %% This is an optimization to avoid listing all files of
+            %% a directory only to discard all but one. For example,
+            %% without this optimizaton, there would be three
+            %% redundant directory listings when executing this
+            %% wildcard: "./lib/compiler/ebin/*.beam"
+            compile_wildcard_2(Rest, compile_join(Root, Pattern));
+        false ->
+            %% This is the end of the literal prefix. Compile the
+            %% rest of the pattern.
+            compile_wildcard_3(Rest, [Pattern,Root])
     end;
 compile_wildcard_2([], {root,PrefixLen,Root}) ->
     {{exists,Root},PrefixLen}.
+
+is_literal_pattern([H|T]) ->
+    is_integer(H) andalso is_literal_pattern(T);
+is_literal_pattern([]) ->
+    true.
 
 compile_wildcard_3([Part|Rest], Result) ->
     compile_wildcard_3(Rest, [compile_part(Part)|Result]);
@@ -409,7 +438,8 @@ compile_join({cwd,Cwd}, File0) ->
 compile_join({root,PrefixLen,Root}, File) ->
     {root,PrefixLen,filename:join(Root, File)}.
 
-compile_part(Part) ->
+compile_part(Part0) ->
+    Part = wrap_escapes(Part0),
     compile_part(Part, false, []).
 
 compile_part_to_sep(Part) ->
@@ -445,6 +475,8 @@ compile_part([${|Rest], Upto, Result) ->
 	error ->
 	    compile_part(Rest, Upto, [${|Result])
     end;
+compile_part([{escaped,X}|Rest], Upto, Result) ->
+    compile_part(Rest, Upto, [X|Result]);
 compile_part([X|Rest], Upto, Result) ->
     compile_part(Rest, Upto, [X|Result]);
 compile_part([], _Upto, Result) ->
@@ -461,6 +493,8 @@ compile_charset1([Lower, $-, Upper|Rest], Ordset) when Lower =< Upper ->
     compile_charset1(Rest, compile_range(Lower, Upper, Ordset));
 compile_charset1([$]|Rest], Ordset) ->
     {ok, {one_of, gb_sets:from_ordset(Ordset)}, Rest};
+compile_charset1([{escaped,X}|Rest], Ordset) ->
+    compile_charset1(Rest, ordsets:add_element(X, Ordset));
 compile_charset1([X|Rest], Ordset) ->
     compile_charset1(Rest, ordsets:add_element(X, Ordset));
 compile_charset1([], _Ordset) ->
@@ -485,6 +519,32 @@ compile_alt(Pattern, Result) ->
 	Pattern ->
 	    error
     end.
+
+%% Convert backslashes to an illegal Unicode character to
+%% protect in from filename:split/1.
+
+convert_escapes([?ESCAPE_PREFIX|T]) ->
+    ?ESCAPED_ESCAPE_PREFIX ++ convert_escapes(T);
+convert_escapes([$\\|T]) ->
+    ?ESCAPE_CHARACTER ++ convert_escapes(T);
+convert_escapes([H|T]) ->
+    [H|convert_escapes(T)];
+convert_escapes([]) ->
+    [].
+
+%% Wrap each escape in a tuple to remove the special meaning for
+%% the character that follows.
+
+wrap_escapes(?ESCAPED_ESCAPE_PREFIX ++ T) ->
+    [?ESCAPE_PREFIX|wrap_escapes(T)];
+wrap_escapes(?ESCAPE_CHARACTER ++ [C|T]) ->
+    [{escaped,C}|wrap_escapes(T)];
+wrap_escapes(?ESCAPE_CHARACTER) ->
+    [];
+wrap_escapes([H|T]) ->
+    [H|wrap_escapes(T)];
+wrap_escapes([]) ->
+    [].
 
 badpattern(Reason) ->
     error({badpattern,Reason}).

@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2008-2017. All Rights Reserved.
+%% Copyright Ericsson AB 2008-2020. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -50,6 +50,7 @@
 %%--------------------------------------------------------------------
 all() -> 
     [
+     {group, 'tlsv1.3'},
      {group, 'tlsv1.2'},
      {group, 'tlsv1.1'},
      {group, 'tlsv1'},
@@ -59,7 +60,8 @@ all() ->
     ].
 
 groups() ->
-    [{'tlsv1.2', [], socket_packet_tests() ++ protocol_packet_tests()},
+    [{'tlsv1.3', [], socket_packet_tests() ++ protocol_packet_tests()},
+     {'tlsv1.2', [], socket_packet_tests() ++ protocol_packet_tests()},
      {'tlsv1.1', [], socket_packet_tests() ++ protocol_packet_tests()},
      {'tlsv1', [], socket_packet_tests() ++ protocol_packet_tests()},
      {'sslv3', [], socket_packet_tests() ++ protocol_packet_tests()},
@@ -141,6 +143,7 @@ socket_active_packet_tests() ->
      packet_4_active_some_big,
      packet_wait_active,
      packet_size_active,
+     packet_switch,
      %% inet header option should be deprecated!
      header_decode_one_byte_active,
      header_decode_two_bytes_active,
@@ -702,6 +705,34 @@ packet_size_passive(Config) when is_list(Config) ->
     ssl_test_lib:close(Server),
     ssl_test_lib:close(Client).
 
+
+%%--------------------------------------------------------------------
+packet_switch() ->
+    [{doc,"Test packet option {packet, 2} followd by {packet, 4}"}].
+
+packet_switch(Config) when is_list(Config) ->
+    ClientOpts = ssl_test_lib:ssl_options(client_opts, Config),
+    ServerOpts = ssl_test_lib:ssl_options(server_opts, Config),
+    {ClientNode, ServerNode, Hostname} = ssl_test_lib:run_where(Config),
+
+    Server = ssl_test_lib:start_server([{node, ClientNode}, {port, 0},
+					{from, self()},
+					{mfa, {?MODULE, send_switch_packet ,["Hello World", 4]}},
+					{options, [{nodelay, true},{packet, 2} | ServerOpts]}]),
+    Port = ssl_test_lib:inet_port(Server),
+    Client = ssl_test_lib:start_client([{node, ServerNode}, {port, Port},
+					{host, Hostname},
+					{from, self()},
+					{mfa, {?MODULE, recv_switch_packet, ["Hello World", 4]}},
+					{options, [{nodelay, true}, {packet, 2} |
+						   ClientOpts]}]),
+
+    ssl_test_lib:check_result(Client, ok, Server, ok),
+
+    ssl_test_lib:close(Server),
+    ssl_test_lib:close(Client).
+
+
 %%--------------------------------------------------------------------
 packet_cdr_decode() ->
     [{doc,"Test setting the packet option {packet, cdr}, {mode, binary}"}].
@@ -831,11 +862,11 @@ server_http_decode(Socket, HttpResponse) ->
 	Other4 -> exit({?LINE, Other4})
     end,
     assert_packet_opt(Socket, http),
-    ok = ssl:send(Socket, HttpResponse),
+    spawn(fun() -> ssl:send(Socket, HttpResponse) end),
     ok.
 
 client_http_decode(Socket, HttpRequest) ->
-    ok = ssl:send(Socket, HttpRequest),
+    spawn(fun() -> ssl:send(Socket, HttpRequest) end),
     receive
 	{ssl, Socket, {http_response, {1,1}, 200, "OK"}}  -> ok;
 	Other1 -> exit({?LINE, Other1})
@@ -893,7 +924,7 @@ packet_http_decode_list(Config) when is_list(Config) ->
 
 
 client_http_decode_list(Socket, HttpRequest) ->
-    ok = ssl:send(Socket, HttpRequest),
+    spawn(fun() -> ssl:send(Socket, HttpRequest) end),
     receive
 	{ssl, Socket, {http_response, {1,1}, 200, "OK"}}  -> ok;
 	Other1 -> exit({?LINE, Other1})
@@ -972,13 +1003,13 @@ server_http_bin_decode(Socket, HttpResponse, Count) when Count > 0 ->
 	Other4 -> exit({?LINE, Other4})
     end,
     assert_packet_opt(Socket, http_bin),
-    ok = ssl:send(Socket, HttpResponse),
+    spawn(fun() -> ssl:send(Socket, HttpResponse) end),
     server_http_bin_decode(Socket, HttpResponse, Count - 1);
 server_http_bin_decode(_, _, _) ->
     ok.
 
 client_http_bin_decode(Socket, HttpRequest, Count) when Count > 0 ->
-    ok = ssl:send(Socket, HttpRequest),
+    spawn(fun() -> ssl:send(Socket, HttpRequest) end),
     receive
 	{ssl, Socket, {http_response, {1,1}, 200, <<"OK">>}}  -> ok;
 	Other1 -> exit({?LINE, Other1})
@@ -1056,7 +1087,7 @@ server_http_decode_error(Socket, HttpResponse) ->
     {ok, http_eoh} = ssl:recv(Socket, 0),
 
     assert_packet_opt(Socket, http),
-    ok = ssl:send(Socket, HttpResponse),
+    spawn(fun() -> ssl:send(Socket, HttpResponse) end),
     ok.
 %%--------------------------------------------------------------------
 packet_httph_active() ->
@@ -1980,15 +2011,17 @@ packet(Config, Data, Send, Recv, Quantity, Packet, Active) ->
     Server = ssl_test_lib:start_server([{node, ClientNode}, {port, 0},
 					{from, self()},
 					{mfa, {?MODULE, Send ,[Data, Quantity]}},
-					{options, [{packet, Packet} | ServerOpts]}]),
+					{options, [{packet, Packet}, {nodelay, true}| ServerOpts]
+                                         ++ ssl_test_lib:bigger_buffers()}]),
     Port = ssl_test_lib:inet_port(Server),
     Client = ssl_test_lib:start_client([{node, ServerNode}, {port, Port},
 					{host, Hostname},
 					{from, self()},
 					{mfa, {?MODULE, Recv, [Data, Quantity]}},
 					{options, [{active, Active},
+                                                   {nodelay, true},
 						   {packet, Packet} |
-						   ClientOpts]}]),
+						   ClientOpts] ++ ssl_test_lib:bigger_buffers()}]),
 
     ssl_test_lib:check_result(Client, ok),
 
@@ -2019,7 +2052,7 @@ passive_recv_packet(Socket, _, 0) ->
 	    {other, Other, ssl:connection_information(Socket, [session_id, cipher_suite]), 0}
     end;
 passive_recv_packet(Socket, Data, N) ->
-    case ssl:recv(Socket, 0) of
+    case ssl:recv(Socket, 0, 10000) of
 	{ok, Data} -> 
 	    passive_recv_packet(Socket, Data, N-1);
 	Other ->
@@ -2079,40 +2112,19 @@ active_once_packet(Socket,_, 0) ->
     end;
 active_once_packet(Socket, Data, N) ->
     receive 	
-	{ssl, Socket, Byte} when length(Byte) == 1 ->
-	    ssl:setopts(Socket, [{active, once}]),
-	    receive 
-		{ssl, Socket, _} ->
-		    ssl:setopts(Socket, [{active, once}]),
-		    active_once_packet(Socket, Data, N-1)
-	    end;
 	{ssl, Socket, Data} ->
-	    ok
-    end,
-    ssl:setopts(Socket, [{active, once}]),
-    active_once_packet(Socket, Data, N-1).
+            ssl:setopts(Socket, [{active, once}]),
+            active_once_packet(Socket, Data, N-1)
+    end.
 
 active_raw(Socket, Data, N) ->
-    active_raw(Socket, Data, N, []).
-
-active_raw(_Socket, _, 0, _) ->
+    active_raw(Socket, (length(Data) * N)).
+active_raw(_Socket, 0) ->
     ok;
-active_raw(Socket, Data, N, Acc) ->
+active_raw(Socket, N) ->
     receive 
-	{ssl, Socket, Byte} when length(Byte) == 1 ->
-	    receive
-		{ssl, Socket, _} ->
-		    active_raw(Socket, Data, N -1)
-	    end;
-	{ssl, Socket, Data} ->
-	    active_raw(Socket, Data, N-1, []);
-	{ssl, Socket, Other} ->
-	    case Acc ++ Other of
-		Data ->
-		    active_raw(Socket, Data, N-1, []);
-		NewAcc ->
-		    active_raw(Socket, Data, NewAcc)
-	    end
+	{ssl, Socket, Bytes} ->
+            active_raw(Socket, N-length(Bytes))
     end.
 
 active_packet(Socket, _, 0) ->
@@ -2124,11 +2136,6 @@ active_packet(Socket, _, 0) ->
     end;
 active_packet(Socket, Data, N) ->
     receive 
-	{ssl, Socket, Byte} when length(Byte) == 1 ->
-	    receive
-		{ssl, Socket, _} ->
-		    active_packet(Socket, Data, N -1)
-		end;
 	{ssl, Socket, Data} ->
 	    active_packet(Socket, Data, N -1);
 	Other ->
@@ -2148,7 +2155,8 @@ server_packet_decode(Socket, Packet) ->
 	{ssl, Socket, Packet}  -> ok;
 	Other2 -> exit({?LINE, Other2})
     end,
-    ok = ssl:send(Socket, Packet).
+    spawn(fun() -> ssl:send(Socket, Packet) end),
+    ok.
 
 client_packet_decode(Socket, Packet) when is_binary(Packet)->
     <<P1:10/binary, P2/binary>> = Packet,
@@ -2157,14 +2165,12 @@ client_packet_decode(Socket, [Head | Tail] = Packet) ->
     client_packet_decode(Socket, [Head], Tail, Packet).
 
 client_packet_decode(Socket, P1, P2, Packet) ->
-    ct:log("Packet: ~p ~n", [Packet]),
-    ok = ssl:send(Socket, P1),
-    ok = ssl:send(Socket, P2),
+    spawn(fun() -> ssl:send(Socket, P1), ssl:send(Socket, P2)  end),
     receive
 	{ssl, Socket, Packet}  -> ok;
 	Other1 -> exit({?LINE, Other1})
     end,
-    ok = ssl:send(Socket, Packet),
+    spawn(fun() -> ssl:send(Socket, Packet) end),
     receive
 	{ssl, Socket, Packet}  -> ok;
 	Other2 -> exit({?LINE, Other2})
@@ -2177,10 +2183,11 @@ server_header_decode_active(Socket, Packet, Result) ->
 	{ssl, Socket, Other1} ->
 	    check_header_result(Result, Other1)
     end,
-    ok = ssl:send(Socket, Packet).
+    spawn(fun() -> ssl:send(Socket, Packet) end),
+    ok.
 
 client_header_decode_active(Socket, Packet, Result) ->
-    ok = ssl:send(Socket, Packet),
+    spawn(fun() -> ssl:send(Socket, Packet) end),
     receive
 	{ssl, Socket, Result}  ->
 	    ok;
@@ -2195,11 +2202,11 @@ server_header_decode_passive(Socket, Packet, Result) ->
 	{ok, Other} ->
 	    check_header_result(Result, Other)
     end,
-    ok = ssl:send(Socket, Packet).
+    spawn(fun() -> ssl:send(Socket, Packet) end),
+    ok.
 
 client_header_decode_passive(Socket, Packet, Result) ->
-    ok = ssl:send(Socket, Packet),
-
+    spawn(fun() -> ssl:send(Socket, Packet) end),
     case ssl:recv(Socket, 0) of
 	{ok, Result} ->
 	    ok;
@@ -2237,7 +2244,8 @@ server_line_packet_decode(Socket, L1, L2, Packet) ->
   	{ssl, Socket,  L2} -> ok;
   	Other2 -> exit({?LINE, Other2})
     end,
-    ok = ssl:send(Socket, Packet).
+    spawn(fun() -> ssl:send(Socket, Packet) end),
+    ok.
 
 client_line_packet_decode(Socket, Packet) when is_binary(Packet)->
     <<P1:10/binary, P2/binary>> = Packet,
@@ -2248,8 +2256,7 @@ client_line_packet_decode(Socket, [Head | Tail] = Packet) ->
     client_line_packet_decode(Socket, [Head], Tail, L1 ++ "\n", L2 ++ "\n").
 
 client_line_packet_decode(Socket, P1, P2, L1, L2) ->
-    ok = ssl:send(Socket, P1),
-    ok = ssl:send(Socket, P2),
+    spawn(fun() -> ssl:send(Socket, P1),  ssl:send(Socket, P2) end),
     receive
   	{ssl, Socket, L1} -> ok;
   	Other1 -> exit({?LINE, Other1})
@@ -2286,3 +2293,27 @@ client_reject_packet_opt(Config, PacketOpt) ->
                                                          ClientOpts]}]),
     
     ssl_test_lib:check_result(Client, {error, {options, {not_supported, PacketOpt}}}).
+
+
+send_switch_packet(SslSocket, Data, NextPacket) ->
+    spawn(fun() -> ssl:send(SslSocket, Data) end),
+    receive
+        {ssl, SslSocket, "Hello World"} ->
+            ssl:setopts(SslSocket, [{packet, NextPacket}]),
+            spawn(fun() -> ssl:send(SslSocket, Data) end),
+            receive 
+                {ssl, SslSocket, "Hello World"} ->
+                    ok
+            end
+    end.
+recv_switch_packet(SslSocket, Data, NextPacket) ->
+    receive
+        {ssl, SslSocket, "Hello World"} ->
+            spawn(fun() -> ssl:send(SslSocket, Data) end),
+            ssl:setopts(SslSocket, [{packet, NextPacket}]),
+            receive 
+                {ssl, SslSocket, "Hello World"} ->
+                    spawn(fun() -> ssl:send(SslSocket, Data) end),
+                    ok                        
+            end
+    end.

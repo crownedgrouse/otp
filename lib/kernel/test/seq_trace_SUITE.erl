@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1998-2016. All Rights Reserved.
+%% Copyright Ericsson AB 1998-2020. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -19,16 +19,23 @@
 %%
 -module(seq_trace_SUITE).
 
+%% label_capability_mismatch needs to run a part of the test on an OTP 20 node.
+-compile(r20).
+
 -export([all/0, suite/0,groups/0,init_per_suite/1, end_per_suite/1, 
 	 init_per_group/2,end_per_group/2,
 	 init_per_testcase/2,end_per_testcase/2]).
 -export([token_set_get/1, tracer_set_get/1, print/1,
+         old_heap_token/1,
 	 send/1, distributed_send/1, recv/1, distributed_recv/1,
 	 trace_exit/1, distributed_exit/1, call/1, port/1,
-	 match_set_seq_token/1, gc_seq_token/1]).
+         port_clean_token/1,
+	 match_set_seq_token/1, gc_seq_token/1, label_capability_mismatch/1,
+         send_literal/1]).
 
 %% internal exports
 -export([simple_tracer/2, one_time_receiver/0, one_time_receiver/1,
+         n_time_receiver/1,
 	 start_tracer/0, stop_tracer/1, 
 	 do_match_set_seq_token/1, do_gc_seq_token/1, countdown_start/2]).
 
@@ -44,10 +51,12 @@ suite() ->
      {timetrap,{minutes,1}}].
 
 all() -> 
-    [token_set_get, tracer_set_get, print, send,
+    [token_set_get, tracer_set_get, print, send, send_literal,
      distributed_send, recv, distributed_recv, trace_exit,
+     old_heap_token,
      distributed_exit, call, port, match_set_seq_token,
-     gc_seq_token].
+     port_clean_token,
+     gc_seq_token, label_capability_mismatch].
 
 groups() -> 
     [].
@@ -90,8 +99,8 @@ do_token_set_get(TsType) ->
     %% Test that initial seq_trace is disabled
     [] = seq_trace:get_token(),
     %% Test setting and reading the different fields
-    0 = seq_trace:set_token(label,17),
-    {label,17} = seq_trace:get_token(label),
+    0 = seq_trace:set_token(label,{my_label,1}),
+    {label,{my_label,1}} = seq_trace:get_token(label),
     false = seq_trace:set_token(print,true),
     {print,true} = seq_trace:get_token(print),
     false = seq_trace:set_token(send,true),
@@ -101,12 +110,12 @@ do_token_set_get(TsType) ->
     false = seq_trace:set_token(TsType,true),
     {TsType,true} = seq_trace:get_token(TsType),
     %% Check the whole token
-    {Flags,17,0,Self,0} = seq_trace:get_token(), % all flags are set
+    {Flags,{my_label,1},0,Self,0} = seq_trace:get_token(), % all flags are set
     %% Test setting and reading the 'serial' field
     {0,0} = seq_trace:set_token(serial,{3,5}),
     {serial,{3,5}} = seq_trace:get_token(serial),
     %% Check the whole token, test that a whole token can be set and get
-    {Flags,17,5,Self,3} = seq_trace:get_token(),
+    {Flags,{my_label,1},5,Self,3} = seq_trace:get_token(),
     seq_trace:set_token({Flags,19,7,Self,5}),
     {Flags,19,7,Self,5} = seq_trace:get_token(),
     %% Check that receive timeout does not reset token
@@ -145,33 +154,71 @@ tracer_set_get(Config) when is_list(Config) ->
     ok.
 
 print(Config) when is_list(Config) ->
-    lists:foreach(fun do_print/1, ?TIMESTAMP_MODES).
+    [do_print(TsType, Label) || TsType <- ?TIMESTAMP_MODES,
+                                Label <- [17, "label"]].
     
-do_print(TsType) ->
+do_print(TsType, Label) ->
     start_tracer(),
+    seq_trace:set_token(label, Label),
     set_token_flags([print, TsType]),
-    seq_trace:print(0,print1),
+    seq_trace:print(Label,print1),
     seq_trace:print(1,print2),
     seq_trace:print(print3),
     seq_trace:reset_trace(),
-    [{0,{print,_,_,[],print1}, Ts0},
-	   {0,{print,_,_,[],print3}, Ts1}] = stop_tracer(2),
+    [{Label,{print,_,_,[],print1}, Ts0},
+     {Label,{print,_,_,[],print3}, Ts1}] = stop_tracer(2),
     check_ts(TsType, Ts0),
     check_ts(TsType, Ts1).
-    
+
 send(Config) when is_list(Config) ->
     lists:foreach(fun do_send/1, ?TIMESTAMP_MODES).
 
 do_send(TsType) ->
+    do_send(TsType, send).
+
+do_send(TsType, Msg) ->
     seq_trace:reset_trace(),
     start_tracer(),
-    Receiver = spawn(?MODULE,one_time_receiver,[]),
+    Receiver = spawn(?MODULE,n_time_receiver,[2]),
+    register(n_time_receiver, Receiver),
+    Label = make_ref(),
+    seq_trace:set_token(label,Label),
     set_token_flags([send, TsType]),
-    Receiver ! send,
+    Receiver ! Msg,
+    n_time_receiver ! Msg,
     Self = self(),
     seq_trace:reset_trace(),
-    [{0,{send,_,Self,Receiver,send}, Ts}] = stop_tracer(1),
-    check_ts(TsType, Ts).
+    [{Label,{send,_,Self,Receiver,Msg}, Ts1},
+     %% Apparently named local destination process is traced as pid (!?)
+     {Label,{send,_,Self,Receiver,Msg}, Ts2}
+    ] = stop_tracer(2),
+    check_ts(TsType, Ts1),
+    check_ts(TsType, Ts2).
+
+%% This testcase tests that we do not segfault when we have a
+%% literal as the message and the message is copied onto the
+%% heap during a GC.
+send_literal(Config) when is_list(Config) ->
+    lists:foreach(fun do_send_literal/1,
+                  [atom, make_ref(), ets:new(hej,[]), 1 bsl 64,
+                   "gurka", {tuple,test,with,#{}}, #{}]).
+
+do_send_literal(Msg) ->
+    N = 10000,
+    seq_trace:reset_trace(),
+    start_tracer(),
+    Label = make_ref(),
+    seq_trace:set_token(label,Label),
+    set_token_flags([send, 'receive', no_timestamp]),
+    Receiver = spawn_link(fun() -> receive ok -> ok end end),
+    [Receiver ! Msg || _ <- lists:seq(1, N)],
+    erlang:garbage_collect(Receiver),
+    [Receiver ! Msg || _ <- lists:seq(1, N)],
+    erlang:garbage_collect(Receiver),
+    Self = self(),
+    seq_trace:reset_trace(),
+    [{Label,{send,_,Self,Receiver,Msg}, Ts} | _] = stop_tracer(N),
+    check_ts(no_timestamp, Ts).
 
 distributed_send(Config) when is_list(Config) ->
     lists:foreach(fun do_distributed_send/1, ?TIMESTAMP_MODES).
@@ -183,15 +230,27 @@ do_distributed_send(TsType) ->
     true = rpc:call(Node,code,add_patha,[Mdir]),
     seq_trace:reset_trace(),
     start_tracer(),
-    Receiver = spawn(Node,?MODULE,one_time_receiver,[]),
+    Receiver = spawn(Node,?MODULE,n_time_receiver,[2]),
+    true = rpc:call(Node,erlang,register,[n_time_receiver, Receiver]),
+
+    %% Make sure complex labels survive the trip.
+    Label = make_ref(),
+    seq_trace:set_token(label,Label),
     set_token_flags([send,TsType]),
+
     Receiver ! send,
+    {n_time_receiver, Node} ! "dsend",
+
     Self = self(),
     seq_trace:reset_trace(),
     stop_node(Node),
-    [{0,{send,_,Self,Receiver,send}, Ts}] = stop_tracer(1),
-    check_ts(TsType, Ts).
-    
+    [{Label,{send,_,Self,Receiver,send}, Ts1},
+     {Label,{send,_,Self,{n_time_receiver,Node}, "dsend"}, Ts2}
+    ] = stop_tracer(2),
+
+    check_ts(TsType, Ts1),
+    check_ts(TsType, Ts2).
+
 
 recv(Config) when is_list(Config) ->
     lists:foreach(fun do_recv/1, ?TIMESTAMP_MODES).
@@ -220,7 +279,12 @@ do_distributed_recv(TsType) ->
     seq_trace:reset_trace(),
     rpc:call(Node,?MODULE,start_tracer,[]),
     Receiver = spawn(Node,?MODULE,one_time_receiver,[]),
+
+    %% Make sure complex labels survive the trip.
+    Label = make_ref(),
+    seq_trace:set_token(label,Label),
     set_token_flags(['receive',TsType]),
+
     Receiver ! 'receive',
     %% let the other process receive the message:
     receive after 1 -> ok end,
@@ -229,7 +293,7 @@ do_distributed_recv(TsType) ->
     Result = rpc:call(Node,?MODULE,stop_tracer,[1]),
     stop_node(Node),
     ok = io:format("~p~n",[Result]),
-    [{0,{'receive',_,Self,Receiver,'receive'}, Ts}] = Result,
+    [{Label,{'receive',_,Self,Receiver,'receive'}, Ts}] = Result,
     check_ts(TsType, Ts).
 
 trace_exit(Config) when is_list(Config) ->
@@ -240,7 +304,12 @@ do_trace_exit(TsType) ->
     start_tracer(),
     Receiver = spawn_link(?MODULE, one_time_receiver, [exit]),
     process_flag(trap_exit, true),
+
+    %% Make sure complex labels survive the trip.
+    Label = make_ref(),
+    seq_trace:set_token(label,Label),
     set_token_flags([send, TsType]),
+
     Receiver ! {before, exit},
     %% let the other process receive the message:
     receive
@@ -254,8 +323,8 @@ do_trace_exit(TsType) ->
     Result = stop_tracer(2),
     seq_trace:reset_trace(),
     ok = io:format("~p~n", [Result]),
-    [{0, {send, {0,1}, Self, Receiver, {before, exit}}, Ts0},
-	   {0, {send, {1,2}, Receiver, Self,
+    [{Label, {send, {0,1}, Self, Receiver, {before, exit}}, Ts0},
+	   {Label, {send, {1,2}, Receiver, Self,
 	       {'EXIT', Receiver, {exit, {before, exit}}}}, Ts1}] = Result,
     check_ts(TsType, Ts0),
     check_ts(TsType, Ts1).
@@ -290,6 +359,74 @@ do_distributed_exit(TsType) ->
     [{0, {send, {1, 2}, Receiver, Self,
 		{'EXIT', Receiver, {exit, {before, exit}}}}, Ts}] = Result,
     check_ts(TsType, Ts).
+
+label_capability_mismatch(Config) when is_list(Config) ->
+    Releases = ["20_latest"],
+    Available = [Rel || Rel <- Releases, test_server:is_release_available(Rel)],
+    case Available of
+        [] -> {skipped, "No incompatible releases available"};
+        _ ->
+            lists:foreach(fun do_incompatible_labels/1, Available),
+            lists:foreach(fun do_compatible_labels/1, Available),
+            ok
+    end.
+
+do_incompatible_labels(Rel) ->
+    Cookie = atom_to_list(erlang:get_cookie()),
+    {ok, Node} = test_server:start_node(
+        list_to_atom(atom_to_list(?MODULE)++"_"++Rel), peer,
+        [{args, " -setcookie "++Cookie}, {erl, [{release, Rel}]}]),
+
+    {_,Dir} = code:is_loaded(?MODULE),
+    Mdir = filename:dirname(Dir),
+    true = rpc:call(Node,code,add_patha,[Mdir]),
+    seq_trace:reset_trace(),
+    true = is_pid(rpc:call(Node,?MODULE,start_tracer,[])),
+    Receiver = spawn(Node,?MODULE,one_time_receiver,[]),
+
+    %% This node does not support arbitrary labels, so it must fail with a
+    %% timeout as the token is dropped silently.
+    seq_trace:set_token(label,make_ref()),
+    seq_trace:set_token('receive',true),
+
+    Receiver ! 'receive',
+    %% let the other process receive the message:
+    receive after 10 -> ok end,
+    seq_trace:reset_trace(),
+
+    {error,timeout} = rpc:call(Node,?MODULE,stop_tracer,[1]),
+    stop_node(Node),
+    ok.
+
+do_compatible_labels(Rel) ->
+    Cookie = atom_to_list(erlang:get_cookie()),
+    {ok, Node} = test_server:start_node(
+        list_to_atom(atom_to_list(?MODULE)++"_"++Rel), peer,
+        [{args, " -setcookie "++Cookie}, {erl, [{release, Rel}]}]),
+
+    {_,Dir} = code:is_loaded(?MODULE),
+    Mdir = filename:dirname(Dir),
+    true = rpc:call(Node,code,add_patha,[Mdir]),
+    seq_trace:reset_trace(),
+    true = is_pid(rpc:call(Node,?MODULE,start_tracer,[])),
+    Receiver = spawn(Node,?MODULE,one_time_receiver,[]),
+
+    %% This node does not support arbitrary labels, but small integers should
+    %% still work.
+    Label = 1234,
+    seq_trace:set_token(label,Label),
+    seq_trace:set_token('receive',true),
+
+    Receiver ! 'receive',
+    %% let the other process receive the message:
+    receive after 10 -> ok end,
+    Self = self(),
+    seq_trace:reset_trace(),
+    Result = rpc:call(Node,?MODULE,stop_tracer,[1]),
+    stop_node(Node),
+    ok = io:format("~p~n",[Result]),
+    [{Label,{'receive',_,Self,Receiver,'receive'}, _}] = Result,
+    ok.
 
 call(doc) -> 
     "Tests special forms {is_seq_trace} and {get_seq_token} "
@@ -445,6 +582,24 @@ get_port_message(Port) ->
 	    ct:fail(timeout)
     end.
 
+
+%% OTP-15849 ERL-700
+%% Verify changing label on existing token when it resides on old heap.
+%% Bug caused faulty ref from old to new heap.
+old_heap_token(Config) when is_list(Config) ->
+    seq_trace:set_token(label, 1),
+    erlang:garbage_collect(self(), [{type, minor}]),
+    erlang:garbage_collect(self(), [{type, minor}]),
+    %% Now token tuple should be on old-heap.
+    %% Set a new non-literal label which should reside on new-heap.
+    NewLabel = {self(), "new label"},
+    1 = seq_trace:set_token(label, NewLabel),
+
+    %% If bug, we now have a ref from old to new heap. Yet another minor gc
+    %% will make that a ref to deallocated memory.
+    erlang:garbage_collect(self(), [{type, minor}]),
+    {label,NewLabel} = seq_trace:get_token(label),
+    ok.
 
 
 match_set_seq_token(doc) ->
@@ -698,6 +853,24 @@ do_shrink(N) ->
     erlang:garbage_collect(),
     do_shrink(N-1).
 
+%% Test that messages from a port does not clear the token
+port_clean_token(Config) when is_list(Config) ->
+    seq_trace:reset_trace(),
+    Label = make_ref(),
+    seq_trace:set_token(label, Label),
+    {label,Label} = seq_trace:get_token(label),
+
+    %% Create a port and get messages from it
+    %% We use os:cmd as a convenience as it does
+    %% open_port, port_command, port_close and receives replies.
+    %% Maybe it is not ideal to rely on the internal implementation
+    %% of os:cmd but it will have to do.
+    os:cmd("ls"),
+
+    %% Make sure that the seq_trace token is still there
+    {label,Label} = seq_trace:get_token(label),
+
+    ok.
 
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -752,7 +925,11 @@ transparent_tracer() ->
 	    end
     end.
 
-
+n_time_receiver(0) ->
+    ok;
+n_time_receiver(N) ->
+    receive _Term -> n_time_receiver(N-1)
+    end.
 
 one_time_receiver() ->
     receive _Term -> ok

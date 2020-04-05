@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2008-2017. All Rights Reserved.
+%% Copyright Ericsson AB 2008-2020. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -49,7 +49,7 @@
 	 server_userpassword_option/1, 
 	 server_pwdfun_option/1,
 	 server_pwdfun_4_option/1,
-	 server_pwdfun_4_option_repeat/1,
+	 server_keyboard_interactive/1,
 	 ssh_connect_arg4_timeout/1, 
 	 ssh_connect_negtimeout_parallel/1, 
 	 ssh_connect_negtimeout_sequential/1, 
@@ -99,7 +99,7 @@ all() ->
      server_userpassword_option,
      server_pwdfun_option,
      server_pwdfun_4_option,
-     server_pwdfun_4_option_repeat,
+     server_keyboard_interactive,
      {group, dir_options},
      ssh_connect_timeout,
      ssh_connect_arg4_timeout,
@@ -214,7 +214,7 @@ init_per_testcase(_TestCase, Config) ->
     file:make_dir(UserDir),
     [{user_dir,UserDir}|Config].
 
-end_per_testcase(_TestCase, Config) ->
+end_per_testcase(_TestCase, _Config) ->
     ssh:stop(),
     ok.
 
@@ -381,7 +381,7 @@ server_pwdfun_4_option(Config) ->
 
     
 %%--------------------------------------------------------------------
-server_pwdfun_4_option_repeat(Config) ->
+server_keyboard_interactive(Config) ->
     UserDir = proplists:get_value(user_dir, Config),
     SysDir = proplists:get_value(data_dir, Config),	  
     %% Test that the state works
@@ -396,19 +396,28 @@ server_pwdfun_4_option_repeat(Config) ->
 					     {pwdfun,PWDFUN}]),
 
     %% Try with passwords "incorrect", "Bad again" and finally "bar"
-    KIFFUN = fun(_,_,_) -> 
+    KIFFUN = fun(_Name, _Instr, _PromptInfos) ->
 		     K={k,self()},
-		     case get(K) of 
-			 undefined -> 
-			     put(K,1),
-			     ["incorrect"]; 
-			 2 ->
-			     put(K,3),
-			     ["bar"];
-			 S->
-			     put(K,S+1),
-			     ["Bad again"]
-		     end
+                     Answer =
+                         case get(K) of
+                             undefined ->
+                                 put(K,1),
+                                 ["incorrect"];
+                             2 ->
+                                 put(K,3),
+                                 ["bar"];
+                             S->
+                                 put(K,S+1),
+                                 ["Bad again"]
+                         end,
+                     ct:log("keyboard_interact_fun:~n"
+                            " Name        = ~p~n"
+                            " Instruction = ~p~n"
+                            " Prompts     = ~p~n"
+                            "~nAnswer:~n  ~p~n",
+                            [_Name, _Instr, _PromptInfos, Answer]),
+
+                     Answer
 	     end,
     
     ConnectionRef2 = 
@@ -796,11 +805,14 @@ do_hostkey_fingerprint_check(Config, HashAlg) ->
     case supported_hash(HashAlg) of
 	true ->
 	    really_do_hostkey_fingerprint_check(Config, HashAlg);
+	false when HashAlg == old ->
+	    {skip,{unsupported_hash,md5}};% Happen to know that public_key:ssh_hostkey_fingerprint/1 uses md5...
 	false ->
 	    {skip,{unsupported_hash,HashAlg}}
     end.
 
-supported_hash(old) -> true;
+supported_hash(old) ->
+    supported_hash(md5); % Happen to know that public_key:ssh_hostkey_fingerprint/1 uses md5...
 supported_hash(HashAlg) ->
     Hs = if is_atom(HashAlg) -> [HashAlg];
             is_list(HashAlg) -> HashAlg
@@ -1227,7 +1239,7 @@ max_sessions(Config, ParallelLogin, Connect0) when is_function(Connect0,2) ->
 	    [_|_] = Connections,
 
 	    %% Now try one more than alowed:
-	    ct:log("Info Report might come here...",[]),
+	    ct:pal("Info Report expected here (if not disabled) ...",[]),
 	    try Connect(Host,Port)
 	    of
 		_ConnectionRef1 ->
@@ -1235,8 +1247,7 @@ max_sessions(Config, ParallelLogin, Connect0) when is_function(Connect0,2) ->
 		    {fail,"Too many connections accepted"}
 	    catch
 		error:{badmatch,{error,"Connection closed"}} ->
-		    %% Step 2 ok: could not set up max_sessions+1 connections
-		    %% This is expected
+                    ct:log("Step 2 ok: could not set up too many connections. Good.",[]),
 		    %% Now stop one connection and try to open one more
 		    ok = ssh:close(hd(Connections)),
 		    try_to_connect(Connect, Host, Port, Pid)
@@ -1249,16 +1260,15 @@ max_sessions(Config, ParallelLogin, Connect0) when is_function(Connect0,2) ->
 
 
 try_to_connect(Connect, Host, Port, Pid) ->
-    {ok,Tref} = timer:send_after(3000, timeout_no_connection), % give the supervisors some time...
+    {ok,Tref} = timer:send_after(30000, timeout_no_connection), % give the supervisors some time...
     try_to_connect(Connect, Host, Port, Pid, Tref, 1). % will take max 3300 ms after 11 tries
 
 try_to_connect(Connect, Host, Port, Pid, Tref, N) ->
      try Connect(Host,Port)
      of
 	 _ConnectionRef1 ->
-	     %% Step 3 ok: could set up one more connection after killing one
-	     %% Thats good.
 	     timer:cancel(Tref),
+             ct:log("Step 3 ok: could set up one more connection after killing one. Thats good.",[]),
 	     ssh:stop_daemon(Pid),
 	     receive % flush. 
 		 timeout_no_connection -> ok

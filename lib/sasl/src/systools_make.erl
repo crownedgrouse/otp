@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 1996-2017. All Rights Reserved.
+%% Copyright Ericsson AB 1996-2020. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -33,6 +33,7 @@
 -export([read_application/4]).
 
 -export([make_hybrid_boot/4]).
+-export([preloaded/0]). % Exported just for testing
 
 -import(lists, [filter/2, keysort/2, keysearch/3, map/2, reverse/1,
 		append/1, foldl/3,  member/2, foreach/2]).
@@ -44,6 +45,15 @@
 -define(XREF_SERVER, systools_make).
 
 -compile({inline,[{badarg,2}]}).
+
+-ifdef(USE_ESOCK).
+-define(ESOCK_SOCKET_MODS, [socket, socket_registry]).
+-define(ESOCK_NET_MODS,    [prim_net]).
+-else.
+-define(ESOCK_SOCKET_MODS, []).
+-define(ESOCK_NET_MODS,    []).
+-endif.
+
 
 %%-----------------------------------------------------------------
 %% Create a boot script from a release file.
@@ -367,6 +377,7 @@ add_apply_upgrade(Script,Args) ->
 %%                  RelVsn/start.boot
 %%                         relup
 %%                         sys.config
+%%                         sys.config.src
 %%         erts-EVsn[/bin]
 %%-----------------------------------------------------------------
 
@@ -1545,6 +1556,12 @@ mandatory_modules() ->
      gen_server,
      heart,
      kernel,
+     logger,
+     logger_filters,
+     logger_server,
+     logger_backend,
+     logger_config,
+     logger_simple_h,
      lists,
      proc_lib,
      supervisor
@@ -1555,11 +1572,11 @@ mandatory_modules() ->
 
 preloaded() ->
     %% Sorted
-    [erl_prim_loader,erl_tracer,erlang,
-     erts_code_purger,erts_dirty_process_code_checker,
+    [atomics,counters,erl_init,erl_prim_loader,erl_tracer,erlang,
+     erts_code_purger,erts_dirty_process_signal_handler,
      erts_internal,erts_literal_area_collector,
-     init,otp_ring0,prim_eval,prim_file,
-     prim_inet,prim_zip,zlib].
+     init,persistent_term,prim_buffer,prim_eval,prim_file,
+     prim_inet] ++ ?ESOCK_NET_MODS ++ [prim_zip] ++ ?ESOCK_SOCKET_MODS ++ [zlib].
 
 %%______________________________________________________________________
 %% Kernel processes; processes that are specially treated by the init
@@ -1569,7 +1586,7 @@ preloaded() ->
 
 kernel_processes() ->
     [{heart, heart, start, []},
-     {error_logger, error_logger, start_link, []},
+     {logger, logger_server, start_link, []},
      {application_controller, application_controller, start,
       fun(Appls) ->
               [{_,App}] = filter(fun({{kernel,_},_App}) -> true;
@@ -1609,6 +1626,7 @@ create_kernel_procs(Appls) ->
 %%                  RelVsn/start.boot
 %%                         relup
 %%                         sys.config
+%%                         sys.config.src
 %%         erts-EVsn[/bin]
 %%
 %% The VariableN.tar.gz files can also be stored as own files not
@@ -1764,14 +1782,18 @@ add_system_files(Tar, RelName, Release, Path1) ->
 	    add_to_tar(Tar, Relup, filename:join(RelVsnDir, "relup"))
     end,
 
-    case lookup_file("sys.config", Path) of
-	false ->
-	    ignore;
-	Sys ->
-	    check_sys_config(Sys),
-	    add_to_tar(Tar, Sys, filename:join(RelVsnDir, "sys.config"))
+    case lookup_file("sys.config.src", Path) of
+        false ->
+            case lookup_file("sys.config", Path) of
+                false ->
+                    ignore;
+                Sys ->
+	            check_sys_config(Sys),
+	            add_to_tar(Tar, Sys, filename:join(RelVsnDir, "sys.config"))
+            end;
+        SysSrc ->
+            add_to_tar(Tar, SysSrc, filename:join(RelVsnDir, "sys.config.src"))
     end,
-    
     ok.
 
 lookup_file(Name, [Dir|Path]) ->

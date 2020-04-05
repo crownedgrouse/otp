@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2013-2017. All Rights Reserved.
+%% Copyright Ericsson AB 2013-2020. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -32,23 +32,9 @@
 
 -export([encode/1, decode/1, decode_keyboard_interactive_prompts/2]).
 
--define('2bin'(X), (if is_binary(X) -> X;
-		       is_list(X) -> list_to_binary(X);
-		       X==undefined -> <<>>
-		    end) ).
+-behaviour(ssh_dbg).
+-export([ssh_dbg_trace_points/0, ssh_dbg_flags/1, ssh_dbg_on/1, ssh_dbg_off/1, ssh_dbg_format/2]).
 
--define('E...'(X),    ?'2bin'(X)/binary ).
--define(Eboolean(X),  ?BOOLEAN(case X of
-				   true -> ?TRUE;
-				   false -> ?FALSE
-			       end) ).
--define(Ebyte(X),        ?BYTE(X) ).
--define(Euint32(X),      ?UINT32(X) ).
--define(Estring(X),      ?STRING(?'2bin'(X)) ).
--define(Estring_utf8(X), ?string_utf8(X)/binary ).
--define(Ename_list(X),   ?STRING(ssh_bits:name_list(X)) ).
--define(Empint(X),       (ssh_bits:mpint(X))/binary ).
--define(Ebinary(X),      ?STRING(X) ).
 
 ucl(B) ->
     try unicode:characters_to_list(B) of
@@ -287,12 +273,12 @@ encode(#ssh_msg_kex_dh_gex_reply{
     <<?Ebyte(?SSH_MSG_KEX_DH_GEX_REPLY), ?Ebinary(EncKey), ?Empint(F), ?Ebinary(EncSign)>>;
 
 encode(#ssh_msg_kex_ecdh_init{q_c = Q_c}) ->
-    <<?Ebyte(?SSH_MSG_KEX_ECDH_INIT), ?Empint(Q_c)>>;
+    <<?Ebyte(?SSH_MSG_KEX_ECDH_INIT), ?Ebinary(Q_c)>>;
 
 encode(#ssh_msg_kex_ecdh_reply{public_host_key = {Key,SigAlg}, q_s = Q_s, h_sig = Sign}) ->
     EncKey = public_key:ssh_encode(Key, ssh2_pubkey),
     EncSign = encode_signature(Key, SigAlg, Sign),
-    <<?Ebyte(?SSH_MSG_KEX_ECDH_REPLY), ?Ebinary(EncKey), ?Empint(Q_s), ?Ebinary(EncSign)>>;
+    <<?Ebyte(?SSH_MSG_KEX_ECDH_REPLY), ?Ebinary(EncKey), ?Ebinary(Q_s), ?Ebinary(EncSign)>>;
 
 encode(#ssh_msg_ignore{data = Data}) ->
     <<?Ebyte(?SSH_MSG_IGNORE), ?Estring_utf8(Data)>>;
@@ -502,13 +488,13 @@ decode(<<?BYTE(?SSH_MSG_KEX_DH_GEX_REPLY), ?DEC_BIN(Key,__0), ?DEC_MPINT(F,__1),
        h_sig = decode_signature(Hashsign)
       };
 
-decode(<<"ecdh",?BYTE(?SSH_MSG_KEX_ECDH_INIT), ?DEC_MPINT(Q_c,__0)>>) ->
+decode(<<"ecdh",?BYTE(?SSH_MSG_KEX_ECDH_INIT), ?DEC_BIN(Q_c,__0)>>) ->
     #ssh_msg_kex_ecdh_init{
        q_c = Q_c
       };
 
 decode(<<"ecdh",?BYTE(?SSH_MSG_KEX_ECDH_REPLY),
-	 ?DEC_BIN(Key,__1), ?DEC_MPINT(Q_s,__2), ?DEC_BIN(Sig,__3)>>) ->
+	 ?DEC_BIN(Key,__1), ?DEC_BIN(Q_s,__2), ?DEC_BIN(Sig,__3)>>) ->
     #ssh_msg_kex_ecdh_reply{
        public_host_key = public_key:ssh_decode(Key, ssh2_pubkey),
        q_s = Q_s,
@@ -609,5 +595,96 @@ encode_signature({_, #'Dss-Parms'{}}, _SigAlg, Signature) ->
     <<?Ebinary(<<"ssh-dss">>), ?Ebinary(Signature)>>;
 encode_signature({#'ECPoint'{}, {namedCurve,OID}}, _SigAlg, Signature) ->
     CurveName = public_key:oid2ssh_curvename(OID),
-    <<?Ebinary(<<"ecdsa-sha2-",CurveName/binary>>), ?Ebinary(Signature)>>.
+    <<?Ebinary(<<"ecdsa-sha2-",CurveName/binary>>), ?Ebinary(Signature)>>;
+encode_signature({ed_pub, ed25519,_}, _SigAlg, Signature) ->
+    <<?Ebinary(<<"ssh-ed25519">>), ?Ebinary(Signature)>>;
+encode_signature({ed_pub, ed448,_}, _SigAlg, Signature) ->
+    <<?Ebinary(<<"ssh-ed448">>), ?Ebinary(Signature)>>.
+    
+
+
+%%%################################################################
+%%%#
+%%%# Tracing
+%%%#
+
+ssh_dbg_trace_points() -> [ssh_messages, raw_messages].
+
+ssh_dbg_flags(ssh_messages) -> [c];
+ssh_dbg_flags(raw_messages) -> [c].
+
+ssh_dbg_on(P) when P==ssh_messages ;
+                   P==raw_messages ->
+    dbg:tp(?MODULE,encode,1,x),
+    dbg:tp(?MODULE,decode,1,x).
+
+ssh_dbg_off(P) when P==ssh_messages ;
+                    P==raw_messages ->
+    dbg:ctpg(?MODULE,encode,1),
+    dbg:ctpg(?MODULE,decode,1).
+
+ssh_dbg_format(ssh_messages, {call,{?MODULE,encode,[Msg]}}) ->
+    Name = string:to_upper(atom_to_list(element(1,Msg))),
+    ["Going to send ",Name,":\n",
+     wr_record(ssh_dbg:shrink_bin(Msg))
+    ];
+ssh_dbg_format(ssh_messages, {return_from,{?MODULE,decode,1},Msg}) ->
+    Name = string:to_upper(atom_to_list(element(1,Msg))),
+    ["Received ",Name,":\n",
+     wr_record(ssh_dbg:shrink_bin(Msg))
+    ];
+ssh_dbg_format(raw_messages, {call,{?MODULE,decode,[BytesPT]}}) ->
+    ["Received plain text bytes (shown after decryption):\n",
+     io_lib:format("~p",[BytesPT])
+    ];
+ssh_dbg_format(raw_messages, {return_from,{?MODULE,encode,1},BytesPT}) ->
+    ["Going to send plain text bytes (shown before encryption):\n",
+     io_lib:format("~p",[BytesPT])
+    ].
+
+
+?wr_record(ssh_msg_disconnect);
+?wr_record(ssh_msg_ignore);
+?wr_record(ssh_msg_unimplemented);
+?wr_record(ssh_msg_debug);
+?wr_record(ssh_msg_service_request);
+?wr_record(ssh_msg_service_accept);
+?wr_record(ssh_msg_kexinit);
+?wr_record(ssh_msg_kexdh_init);
+?wr_record(ssh_msg_kexdh_reply);
+?wr_record(ssh_msg_newkeys);
+?wr_record(ssh_msg_ext_info);
+?wr_record(ssh_msg_kex_dh_gex_request);
+?wr_record(ssh_msg_kex_dh_gex_request_old);
+?wr_record(ssh_msg_kex_dh_gex_group);
+?wr_record(ssh_msg_kex_dh_gex_init);
+?wr_record(ssh_msg_kex_dh_gex_reply);
+?wr_record(ssh_msg_kex_ecdh_init);
+?wr_record(ssh_msg_kex_ecdh_reply);
+
+?wr_record(ssh_msg_userauth_request);
+?wr_record(ssh_msg_userauth_failure);
+?wr_record(ssh_msg_userauth_success);
+?wr_record(ssh_msg_userauth_banner);
+?wr_record(ssh_msg_userauth_passwd_changereq);
+?wr_record(ssh_msg_userauth_pk_ok);
+?wr_record(ssh_msg_userauth_info_request);
+?wr_record(ssh_msg_userauth_info_response);
+
+?wr_record(ssh_msg_global_request);
+?wr_record(ssh_msg_request_success);
+?wr_record(ssh_msg_request_failure);
+?wr_record(ssh_msg_channel_open);
+?wr_record(ssh_msg_channel_open_confirmation);
+?wr_record(ssh_msg_channel_open_failure);
+?wr_record(ssh_msg_channel_window_adjust);
+?wr_record(ssh_msg_channel_data);
+?wr_record(ssh_msg_channel_extended_data);
+?wr_record(ssh_msg_channel_eof);
+?wr_record(ssh_msg_channel_close);
+?wr_record(ssh_msg_channel_request);
+?wr_record(ssh_msg_channel_success);
+?wr_record(ssh_msg_channel_failure);
+
+wr_record(R) -> io_lib:format('~p~n',[R]).
 

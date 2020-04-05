@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 2008-2017. All Rights Reserved.
+%% Copyright Ericsson AB 2008-2020. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -50,7 +50,9 @@ all() ->
 groups() -> 
     [{erlang_client, [], [erlang_shell_client_openssh_server
 			 ]},
-     {erlang_server, [], [erlang_server_openssh_client_renegotiate
+     {erlang_server, [], [erlang_server_openssh_client_renegotiate,
+                          exec_with_io_in_sshc,
+                          exec_direct_with_io_in_sshc
 			 ]}
     ].
 
@@ -60,7 +62,10 @@ init_per_suite(Config) ->
 	   {error,econnrefused} ->
 	       {skip,"No openssh deamon (econnrefused)"};
 	   _ ->
-	       ssh_test_lib:openssh_sanity_check(Config)
+               ssh_test_lib:openssh_sanity_check(
+                 [{ptty_supported, ssh_test_lib:ptty_supported()}
+                  | Config]
+                )
        end
       ).
 
@@ -113,13 +118,78 @@ erlang_shell_client_openssh_server() ->
 erlang_shell_client_openssh_server(Config) when is_list(Config) ->
     process_flag(trap_exit, true),
     IO = ssh_test_lib:start_io_server(),
+    Prev = lists:usort(supervisor:which_children(sshc_sup)),
     Shell = ssh_test_lib:start_shell(?SSH_DEFAULT_PORT, IO),
     IO ! {input, self(), "echo Hej\n"},
-    receive_data("Hej", undefined),
-    IO ! {input, self(), "exit\n"},
-    receive_logout(),
-    receive_normal_exit(Shell).
-   
+    case proplists:get_value(ptty_supported, Config) of
+        true ->
+            ct:log("~p:~p  ptty supported", [?MODULE,?LINE]),
+            receive_data("Hej", undefined),
+            IO ! {input, self(), "exit\n"},
+            receive_logout(),
+            receive_normal_exit(Shell),
+            %% Check that the connection is closed:
+            ct:log("Expects ~p", [Prev]),
+            ?wait_match(Prev, lists:usort(supervisor:which_children(sshc_sup)));
+        false ->
+            ct:log("~p:~p  ptty unsupported", [?MODULE,?LINE]),
+            receive_exit(Shell,
+                         fun({{badmatch,failure},
+                              [{ssh,shell,_,_} | _]}) -> true;
+                            (_) ->
+                                 false
+                         end)
+    end.
+
+%%--------------------------------------------------------------------
+%% Test that the server could redirect stdin and stdout from/to an
+%% OpensSSH client when handling an exec request
+exec_with_io_in_sshc(Config) when is_list(Config) ->
+    SystemDir = proplists:get_value(data_dir, Config),
+    {Pid, Host, Port} = ssh_test_lib:daemon([{system_dir, SystemDir},
+                                             {failfun, fun ssh_test_lib:failfun/2}]),
+    ct:sleep(500),
+
+    ExecStr = "\"io:read('% ').\"",
+    Cmd =  "echo howdy. | " ++ ssh_test_lib:open_sshc_cmd(Host, Port,
+                                                          "-x", % Disable X forwarding
+                                                          ExecStr),
+    ct:pal("Cmd = ~p~n",[Cmd]),
+    case os:cmd(Cmd) of
+        "% {ok,howdy}" -> ok;
+        "{ok,howdy}% " -> ok; % Could happen if the client sends the piped
+                              % input before receiving the prompt ("% ").
+        Other -> ct:fail("Received ~p",[Other])
+    end,
+    ssh:stop_daemon(Pid).
+
+%%--------------------------------------------------------------------
+%% Test that the server could redirect stdin and stdout from/to an
+%% OpensSSH client when handling an direct exec request
+exec_direct_with_io_in_sshc(Config) when is_list(Config) ->
+    SystemDir = proplists:get_value(data_dir, Config),
+    {Pid, Host, Port} = ssh_test_lib:daemon([{system_dir, SystemDir},
+                                             {failfun, fun ssh_test_lib:failfun/2},
+                                             {exec,{direct,fun(Cmnd) ->
+                                                                   {ok,X} = io:read(Cmnd),
+                                                                   {ok,{X,lists:reverse(atom_to_list(X))}}
+                                                           end}}
+                                            ]),
+    ct:sleep(500),
+
+    Cmd =  "echo ciao. | " ++ ssh_test_lib:open_sshc_cmd(Host, Port,
+                                                         "-x", % Disable X forwarding
+                                                         "'? '"),
+    ct:pal("Cmd = ~p~n",[Cmd]),
+    case os:cmd(Cmd) of
+        "? {ciao,\"oaic\"}" -> ok;
+        "'? '{ciao,\"oaic\"}" -> ok; % WSL
+        "{ciao,\"oaic\"}? " -> ok; % Could happen if the client sends the piped
+                                   % input before receiving the prompt ("? ").
+        Other -> ct:fail("Received ~p",[Other])
+    end,
+    ssh:stop_daemon(Pid).
+
 %%--------------------------------------------------------------------
 %% Test that the Erlang/OTP server can renegotiate with openSSH
 erlang_server_openssh_client_renegotiate(Config) ->
@@ -185,14 +255,14 @@ receive_data(Data, Conn) ->
 	    Lines = string:tokens(binary_to_list(Info), "\r\n "),
 	    case lists:member(Data, Lines) of
 		true ->
-		    ct:log("Expected result ~p found in lines: ~p~n", [Data,Lines]),
+		    ct:log("~p:~p  Expected result ~p found in lines: ~p~n", [?MODULE,?LINE,Data,Lines]),
 		    ok;
 		false ->
-		    ct:log("Extra info: ~p~n", [Info]),
+		    ct:log("~p:~p  Extra info: ~p~n", [?MODULE,?LINE,Info]),
 		    receive_data(Data, Conn)
 	    end;
 	Other ->
-	    ct:log("Unexpected: ~p",[Other]),
+	    ct:log("~p:~p  Unexpected: ~p",[?MODULE,?LINE,Other]),
 	    receive_data(Data, Conn)
     after
 	30000 ->
@@ -221,17 +291,31 @@ receive_logout() ->
 	30000 -> ct:fail("timeout ~p:~p",[?MODULE,?LINE])
     end.
 
+
 receive_normal_exit(Shell) ->
+    receive_exit(Shell, fun(Reason) -> Reason == normal end).
+
+
+receive_exit(Shell, F) when is_function(F,1) ->
     receive
-	{'EXIT', Shell, normal} ->
-	    ok;
-	<<"\r\n">> ->
-	    receive_normal_exit(Shell);
-	Other ->
-	    ct:fail({unexpected_msg, Other})
-    after 
+        {'EXIT', Shell, Reason} ->
+            case F(Reason) of
+                true ->
+                    ok;
+                false ->
+                    ct:fail({unexpected_exit, Reason})
+            end;
+
+        <<"\r\n">> ->
+            receive_normal_exit(Shell);
+
+        Other ->
+            ct:fail({unexpected_msg, Other})
+
+        after 
 	30000 -> ct:fail("timeout ~p:~p",[?MODULE,?LINE])
     end.
+
 
 extra_logout() ->
     receive 	

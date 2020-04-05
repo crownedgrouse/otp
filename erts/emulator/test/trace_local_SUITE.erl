@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 2000-2017. All Rights Reserved.
+%% Copyright Ericsson AB 2000-2020. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -1181,7 +1181,9 @@ undef(X) ->
     ?MODULE:undef(X, X). % undef
 
 lists_reverse(A, B) ->
-    lists:reverse(A, B).
+    Res = lists:reverse(A, B),
+    _ = (catch abs(A)),
+    Res.
 
 
 

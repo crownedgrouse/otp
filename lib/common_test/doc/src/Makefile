@@ -1,7 +1,7 @@
 #
 # %CopyrightBegin%
 #
-# Copyright Ericsson AB 2003-2017. All Rights Reserved.
+# Copyright Ericsson AB 2003-2020. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -74,6 +74,7 @@ XML_CHAPTER_FILES = \
 	ct_master_chapter.xml \
 	event_handler_chapter.xml \
 	ct_hooks_chapter.xml \
+	ct_property_test_chapter.xml \
 	dependencies_chapter.xml \
 	notes.xml
 
@@ -140,6 +141,7 @@ debug opt:
 
 clean clean_docs:
 	rm -rf $(HTMLDIR)/*
+	rm -rf $(XMLDIR)
 	rm -f $(MAN1DIR)/*
 	rm -f $(MAN3DIR)/*
 	rm -f $(MAN6DIR)/*

@@ -2,7 +2,7 @@
 /*
  * %CopyrightBegin%
  *
- * Copyright Ericsson AB 1998-2016. All Rights Reserved.
+ * Copyright Ericsson AB 1998-2020. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -437,6 +437,11 @@ static void usage(EpmdVars *g)
     fprintf(stderr, "        epmd -kill even if there "
 	    "are registered nodes.\n");
     fprintf(stderr, "        Also allows forced unregister (epmd -stop).\n");
+#ifdef HAVE_SYSTEMD_DAEMON
+    fprintf(stderr, "    -systemd\n");
+    fprintf(stderr, "        Wait for socket from systemd. The option makes sense\n");
+    fprintf(stderr, "        when started from .socket unit.\n");
+#endif /* HAVE_SYSTEMD_DAEMON */
     fprintf(stderr, "\nDbgExtra options\n");
     fprintf(stderr, "    -packet_timeout Seconds\n");
     fprintf(stderr, "        Set the number of seconds a connection can be\n");
@@ -462,11 +467,6 @@ static void usage(EpmdVars *g)
     fprintf(stderr, "        Forcibly unregisters a name with epmd\n");
     fprintf(stderr, "        (only allowed if -relaxed_command_check was given when \n");
     fprintf(stderr, "        epmd was started).\n");
-#ifdef HAVE_SYSTEMD_DAEMON
-    fprintf(stderr, "    -systemd\n");
-    fprintf(stderr, "        Wait for socket from systemd. The option makes sense\n");
-    fprintf(stderr, "        when started from .socket unit.\n");
-#endif /* HAVE_SYSTEMD_DAEMON */
     epmd_cleanup_exit(g,1);
 }
 

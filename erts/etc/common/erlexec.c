@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  *
- * Copyright Ericsson AB 1996-2017. All Rights Reserved.
+ * Copyright Ericsson AB 1996-2020. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,14 +23,9 @@
  * additions required for Windows NT.
  */
 
-#ifdef HAVE_CONFIG_H
-#  include "config.h"
-#endif
+#include "etc_common.h"
 
-#include "sys.h"
 #include "erl_driver.h"
-#include <stdlib.h>
-#include <stdarg.h>
 #include "erl_misc_utils.h"
 
 #ifdef __WIN32__
@@ -84,6 +79,7 @@ static const char plusM_au_allocs[]= {
 static char *plusM_au_alloc_switches[] = {
     "as",
     "asbcst",
+    "atags",
     "acul",
     "acnl",
     "acfml",
@@ -134,6 +130,8 @@ static char *plusM_other_switches[] = {
 /* +s arguments with values */
 static char *pluss_val_switches[] = {
     "bt",
+    "bwtdcpu",
+    "bwtdio",
     "bwt",
     "cl",
     "ct",
@@ -141,6 +139,8 @@ static char *pluss_val_switches[] = {
     "fwi",
     "tbt",
     "wct",
+    "wtdcpu",
+    "wtdio",
     "wt",
     "ws",
     "ss",
@@ -197,9 +197,7 @@ void error(char* format, ...);
  * Local functions.
  */
 
-#if !defined(ERTS_HAVE_SMP_EMU) || !defined(ERTS_HAVE_PLAIN_EMU)
 static void usage_notsup(const char *switchname, const char *alt);
-#endif
 static char **build_args_from_env(char *env_var);
 static char **build_args_from_string(char *env_var);
 static void initial_argv_massage(int *argc, char ***argv);
@@ -247,7 +245,7 @@ static int verbose = 0;		/* If non-zero, print some extra information. */
 static int start_detached = 0;	/* If non-zero, the emulator should be
 				 * started detached (in the background).
 				 */
-static int start_smp_emu = 0;   /* Start the smp emulator. */
+static int start_smp_emu = 1;   /* Start the smp emulator. */
 static const char* emu_type = 0; /* Type of emulator (lcnt, valgrind, etc) */
 
 #ifdef __WIN32__
@@ -257,7 +255,9 @@ static char* key_val_name = ERLANG_VERSION; /* Used by the registry
 					   * access functions.
 					   */
 static char* boot_script = NULL; /* used by option -start_erl and -boot */
-static char* config_script = NULL; /* used by option -start_erl and -config */
+static char** config_scripts = NULL; /* used by option -start_erl and -config */
+static int config_script_cnt = 0;
+static int got_start_erl = 0;
 
 static HANDLE this_module_handle;
 static int run_werl;
@@ -377,7 +377,7 @@ add_extra_suffixes(char *prog)
    }
 #endif
 
-   if (emu_type) {
+   if (emu_type && strcmp("opt",emu_type) != 0) {
        p = write_str(p, ".");
        p = write_str(p, emu_type);
    }
@@ -392,6 +392,22 @@ add_extra_suffixes(char *prog)
 
    return res;
 }
+
+#ifdef __WIN32__
+static void add_boot_config(void)
+{
+    int i;
+    if (boot_script)
+	add_args("-boot", boot_script, NULL);
+    for (i = 0; i < config_script_cnt; i++) {
+        add_args("-config", config_scripts[i], NULL);
+    }
+}
+# define ADD_BOOT_CONFIG add_boot_config()
+#else
+# define ADD_BOOT_CONFIG
+#endif
+
 
 #ifdef __WIN32__
 __declspec(dllexport) int win_erlexec(int argc, char **argv, HANDLE module, int windowed)
@@ -410,7 +426,6 @@ int main(int argc, char **argv)
     int process_args = 1;
     int print_args_exit = 0;
     int print_qouted_cmd_exit = 0;
-    erts_cpu_info_t *cpuinfo = NULL;
     char* emu_name;
 
 #ifdef __WIN32__
@@ -469,12 +484,6 @@ int main(int argc, char **argv)
     /*
      * Construct the path of the executable.
      */
-    cpuinfo = erts_cpu_info_create();
-    /* '-smp auto' is default */ 
-#ifdef ERTS_HAVE_SMP_EMU
-    start_smp_emu = 1;
-#endif
-
 #if defined(__WIN32__) && defined(WIN32_ALWAYS_DEBUG)
     emu_type = "debug";
 #endif
@@ -505,23 +514,13 @@ int main(int argc, char **argv)
 		    i++;
 		smp_enable:
                     ;
-#if !defined(ERTS_HAVE_SMP_EMU)
-		    usage_notsup("-smp enable", "");
-#endif
 		} else if (strcmp(argv[i+1], "disable") == 0) {
 		    i++;
 		smp_disable:
-#ifdef ERTS_HAVE_PLAIN_EMU
-                    start_smp_emu = 0;
-#else
                     usage_notsup("-smp disable", " Use \"+S 1\" instead.");
-#endif
 		} else {
 		smp:
                     ;
-#if !defined(ERTS_HAVE_SMP_EMU)
-		    usage_notsup("-smp", "");
-#endif
 		}
 	    } else if (strcmp(argv[i], "-smpenable") == 0) {
 		goto smp_enable;
@@ -542,9 +541,6 @@ int main(int argc, char **argv)
 	i++;
     }
 
-    erts_cpu_info_destroy(cpuinfo);
-    cpuinfo = NULL;
-
     if (malloc_lib) {
 	if (strcmp(malloc_lib, "libc") != 0)
 	    usage("+MYm");
@@ -560,33 +556,48 @@ int main(int argc, char **argv)
     } else {
         add_Eargs(emu);       /* argv[0] = erl or cerl */
     }
-    /*
-     * Add the bindir to the path (unless it is there already).
-     */
+
+    /* Add the bindir to the front of the PATH, and remove all subsequent
+     * occurrences to avoid ballooning it on repeated up/downgrades. */
 
     s = get_env("PATH");
-    if (!s) {
-	erts_snprintf(tmpStr, sizeof(tmpStr), "%s" PATHSEP "%s" DIRSEP "bin", bindir, rootdir);
-    } else if (strstr(s, bindir) == NULL) {
-	erts_snprintf(tmpStr, sizeof(tmpStr), "%s" PATHSEP "%s" DIRSEP "bin" PATHSEP "%s", bindir,
-		rootdir, s);
+
+    if (s == NULL) {
+        erts_snprintf(tmpStr, sizeof(tmpStr),
+            "%s" PATHSEP "%s" DIRSEP "bin" PATHSEP, bindir, rootdir);
+    } else if (strstr(s, rootdir) == NULL) {
+        erts_snprintf(tmpStr, sizeof(tmpStr),
+            "%s" PATHSEP "%s" DIRSEP "bin" PATHSEP "%s", bindir, rootdir, s);
     } else {
-	erts_snprintf(tmpStr, sizeof(tmpStr), "%s", s);
+        const char *bindir_slug, *bindir_slug_index;
+        int bindir_slug_length;
+        const char *in_index;
+        char *out_index;
+
+        erts_snprintf(tmpStr, sizeof(tmpStr), "%s" PATHSEP, bindir);
+
+        bindir_slug = strsave(tmpStr);
+        bindir_slug_length = strlen(bindir_slug);
+
+        out_index = &tmpStr[bindir_slug_length];
+        in_index = s;
+
+        while ((bindir_slug_index = strstr(in_index, bindir_slug))) {
+            int block_length = (bindir_slug_index - in_index);
+
+            memcpy(out_index, in_index, block_length);
+
+            in_index = bindir_slug_index + bindir_slug_length;
+            out_index += block_length;
+        }
+
+        strcpy(out_index, in_index);
     }
+
     free_env_val(s);
     set_env("PATH", tmpStr);
     
     i = 1;
-
-#ifdef __WIN32__
-#define ADD_BOOT_CONFIG					\
-    if (boot_script)					\
-	add_args("-boot", boot_script, NULL);		\
-    if (config_script)					\
-	add_args("-config", config_script, NULL);
-#else
-#define ADD_BOOT_CONFIG
-#endif
 
     get_home();
     add_args("-home", home, NULL);
@@ -607,7 +618,9 @@ int main(int argc, char **argv)
 		case 'b':
 		    if (strcmp(argv[i], "-boot") == 0) {
 			if (boot_script)
-			    error("Conflicting -start_erl and -boot options");
+			    error("Conflicting -boot options");
+                        if (got_start_erl)
+                            error("Conflicting -start_erl and -boot options");
 			if (i+1 >= argc)
 			    usage("-boot");
 			boot_script = strsave(argv[i+1]);
@@ -631,11 +644,14 @@ int main(int argc, char **argv)
 		    }
 #ifdef __WIN32__
 		    else if (strcmp(argv[i], "-config") == 0){
-			if (config_script)
+			if (got_start_erl)
 			    error("Conflicting -start_erl and -config options");
 			if (i+1 >= argc)
 			    usage("-config");
-			config_script = strsave(argv[i+1]);
+                        config_script_cnt++;
+                        config_scripts = erealloc(config_scripts,
+                                                  config_script_cnt * sizeof(char*));
+			config_scripts[config_script_cnt-1] = strsave(argv[i+1]);
 			i++;
 		    }
 #endif
@@ -651,15 +667,6 @@ int main(int argc, char **argv)
 			start_detached = 1;
 			add_args("-noshell", "-noinput", NULL);
 		    }
-		    break;
-
-		  case 'i':
-		    if (strcmp(argv[i], "-instr") == 0) {
-			add_Eargs("-Mim");
-			add_Eargs("true");
-		    }
-		    else
-			add_arg(argv[i]);
 		    break;
 
 		  case 'e':
@@ -810,10 +817,8 @@ int main(int argc, char **argv)
 
 	      case '+':
 		switch (argv[i][1]) {
-		  case '#':
 		  case 'a':
 		  case 'A':
-		  case 'b':
 		  case 'C':
 		  case 'e':
 		  case 'i':
@@ -834,6 +839,28 @@ int main(int argc, char **argv)
 		      add_Eargs(argv[i+1]);
 		      i++;
 		      break;
+		  case 'I':
+                      if (argv[i][2] == 'O' && (argv[i][3] == 't' || argv[i][3] == 'p')) {
+                          if (argv[i][4] != '\0')
+                              goto the_default;
+                          argv[i][0] = '-';
+                          add_Eargs(argv[i]);
+                          add_Eargs(argv[i+1]);
+                          i++;
+                          break;
+                      }
+                      if (argv[i][2] == 'O' && argv[i][3] == 'P' &&
+                          (argv[i][4] == 't' || argv[i][4] == 'p')) {
+                          if (argv[i][5] != '\0')
+                              goto the_default;
+                          argv[i][0] = '-';
+                          add_Eargs(argv[i]);
+                          add_Eargs(argv[i+1]);
+                          i++;
+                          break;
+                      }
+                      usage(argv[i]);
+                      break;
 		  case 'S':
 		      if (argv[i][2] == 'P') {
 			  if (argv[i][3] != '\0')
@@ -889,8 +916,8 @@ int main(int argc, char **argv)
 		  case 'c':
 		      argv[i][0] = '-';
 		      if (argv[i][2] == '\0' && i+1 < argc) {
-			  if (sys_strcmp(argv[i+1], "true") == 0
-			      || sys_strcmp(argv[i+1], "false") == 0) {
+			  if (strcmp(argv[i+1], "true") == 0
+			      || strcmp(argv[i+1], "false") == 0) {
 			      add_Eargs(argv[i]);
 			      add_Eargs(argv[i+1]);
 			      i++;
@@ -1162,15 +1189,6 @@ usage_aux(void)
 #ifdef __WIN32__
 	  "[-start_erl [datafile]] "
 #endif
-	  "[-smp [auto"
-#ifdef ERTS_HAVE_SMP_EMU
-	  "|enable"
-#endif
-#ifdef ERTS_HAVE_PLAIN_EMU
-	  "|disable"
-#endif
-	  "]"
-	  "] "
 	  "[-make] [-man [manopts] MANPAGE] [-x] [-emu_args] [-start_epmd BOOLEAN] "
 	  "[-args_file FILENAME] [+A THREADS] [+a SIZE] [+B[c|d|i]] [+c [BOOLEAN]] "
 	  "[+C MODE] [+h HEAP_SIZE_OPTION] [+K BOOLEAN] "
@@ -1191,14 +1209,12 @@ usage(const char *switchname)
     usage_aux();
 }
 
-#if !defined(ERTS_HAVE_SMP_EMU) || !defined(ERTS_HAVE_PLAIN_EMU)
 static void
 usage_notsup(const char *switchname, const char *alt)
 {
     fprintf(stderr, "Argument \'%s\' not supported.%s\n", switchname, alt);
     usage_aux();
 }
-#endif
 
 static void
 usage_format(char *format, ...)
@@ -1368,6 +1384,7 @@ strsave(char* string)
 
 static void get_start_erl_data(char *file)
 {
+    static char* a_config_script;
     int fp;
     char tmpbuffer[512];
     char start_erl_data[512];
@@ -1378,7 +1395,7 @@ static void get_start_erl_data(char *file)
     char* tprogname;
     if (boot_script) 
 	error("Conflicting -start_erl and -boot options");
-    if (config_script)
+    if (config_scripts)
 	error("Conflicting -start_erl and -config options");
     env = get_env("RELDIR");
     if (env)
@@ -1428,10 +1445,13 @@ static void get_start_erl_data(char *file)
     erts_snprintf(progname,strlen(tprogname) + 20,"%s -start_erl",tprogname);
 
     boot_script = emalloc(512);
-    config_script = emalloc(512);
+    a_config_script = emalloc(512);
     erts_snprintf(boot_script, 512, "%s/%s/start", reldir, otpstring);
-    erts_snprintf(config_script, 512, "%s/%s/sys", reldir, otpstring);
+    erts_snprintf(a_config_script, 512, "%s/%s/sys", reldir, otpstring);
+    config_scripts = &a_config_script;
+    config_script_cnt = 1;
        
+    got_start_erl = 1;
 }
 
 
@@ -1670,9 +1690,9 @@ static char **build_args_from_string(char *string)
     for(;;) {
 	switch (state) {
 	case Start:
-	    if (!*p) 
+	    if (!*p)
 		goto done;
-	    if (argc >= alloced - 1) { /* Make room for extra NULL */
+	    if (argc >= alloced - 2) { /* Make room for extra NULL and "--" */
 		argv = erealloc(argv, (alloced += 10) * sizeof(char *));
 	    }
 	    cur_s = argc + argv;
@@ -1761,11 +1781,14 @@ static char **build_args_from_string(char *string)
 	}
     }
 done:
-    argv[argc] = NULL; /* Sure to be large enough */
     if (!argc) {
 	efree(argv);
 	return NULL;
     }
+    argv[argc++] = "--"; /* Add a -- separator in order
+                            for different from different environments
+                            to effect each other */
+    argv[argc++] = NULL; /* Sure to be large enough */
     return argv;
 #undef ENSURE
 }
@@ -2016,11 +2039,13 @@ initial_argv_massage(int *argc, char ***argv)
     argv_buf ab = {0}, xab = {0};
     int ix, vix, ac;
     char **av;
+    char *sep = "--";
     struct {
 	int argc;
 	char **argv;
     } avv[] = {{INT_MAX, NULL}, {INT_MAX, NULL}, {INT_MAX, NULL},
-	       {INT_MAX, NULL}, {INT_MAX, NULL}, {INT_MAX, NULL}};
+	       {INT_MAX, NULL}, {INT_MAX, NULL},
+               {INT_MAX, NULL}, {INT_MAX, NULL}};
     /*
      * The environment flag containing OTP release is intentionally
      * undocumented and intended for OTP internal use only.
@@ -2040,6 +2065,8 @@ initial_argv_massage(int *argc, char ***argv)
     if (*argc > 1) {
 	avv[vix].argc = *argc - 1;
 	avv[vix++].argv = &(*argv)[1];
+        avv[vix].argc = 1;
+        avv[vix++].argv = &sep;
     }
 
     av = build_args_from_env("ERL_FLAGS");
@@ -2197,18 +2224,18 @@ static WCHAR *utf8_to_utf16(unsigned char *bytes)
     res = target = emalloc((num + 1) * sizeof(WCHAR));
     while (*bytes) {
 	if (((*bytes) & ((unsigned char) 0x80)) == 0) {
-	    unipoint = (Uint) *bytes;
+	    unipoint = (unsigned int) *bytes;
 	    ++bytes;
 	} else if (((*bytes) & ((unsigned char) 0xE0)) == 0xC0) {
 	    unipoint = 
-		(((Uint) ((*bytes) & ((unsigned char) 0x1F))) << 6) |
-		((Uint) (bytes[1] & ((unsigned char) 0x3F))); 	
+		(((unsigned int) ((*bytes) & ((unsigned char) 0x1F))) << 6) |
+		((unsigned int) (bytes[1] & ((unsigned char) 0x3F)));
 	    bytes += 2;
 	} else if (((*bytes) & ((unsigned char) 0xF0)) == 0xE0) {
 	    unipoint = 
-		(((Uint) ((*bytes) & ((unsigned char) 0xF))) << 12) |
-		(((Uint) (bytes[1] & ((unsigned char) 0x3F))) << 6) |
-		((Uint) (bytes[2] & ((unsigned char) 0x3F)));
+		(((unsigned int) ((*bytes) & ((unsigned char) 0xF))) << 12) |
+		(((unsigned int) (bytes[1] & ((unsigned char) 0x3F))) << 6) |
+		((unsigned int) (bytes[2] & ((unsigned char) 0x3F)));
 	    if (unipoint > 0xFFFF) {
 		 unipoint = (unsigned int) '?';
 	    }
@@ -2227,7 +2254,7 @@ static WCHAR *utf8_to_utf16(unsigned char *bytes)
 
 static int put_utf8(WCHAR ch, unsigned char *target, int sz, int *pos)
 {
-    Uint x = (Uint) ch;
+    unsigned int x = (unsigned int) ch;
     if (x < 0x80) {
     if (*pos >= sz) {
 	return -1;

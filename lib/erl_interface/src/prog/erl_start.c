@@ -1,7 +1,7 @@
 /*
  * %CopyrightBegin%
  * 
- * Copyright Ericsson AB 1997-2016. All Rights Reserved.
+ * Copyright Ericsson AB 1997-2020. All Rights Reserved.
  * 
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -97,7 +97,7 @@
 #endif
 
 #ifndef RSH
-#define RSH "/usr/bin/rsh"
+#define RSH "/usr/bin/ssh"
 #endif
 
 #ifndef HAVE_SOCKLEN_T
@@ -657,7 +657,7 @@ static int wait_for_erlang(int sockd, int magic, struct timeval *timeout)
     gettimeofday(&now,NULL);
     to.tv_sec = stop_time.tv_sec - now.tv_sec;
     to.tv_usec = stop_time.tv_usec - now.tv_usec;
-    while ((to.tv_usec <= 0) && (to.tv_sec >= 0)) {
+    while ((to.tv_usec < 0) && (to.tv_sec > 0)) {
       to.tv_usec += 1000000;
       to.tv_sec--;
     }

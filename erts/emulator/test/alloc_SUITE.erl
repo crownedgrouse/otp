@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 2003-2016. All Rights Reserved.
+%% Copyright Ericsson AB 2003-2018. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -67,16 +67,12 @@ mseg_clear_cache(Cfg) -> drv_case(Cfg).
 cpool(Cfg) -> drv_case(Cfg).
 
 migration(Cfg) ->
-    case erlang:system_info(smp_support) of
-	true ->
-            %% Enable test_alloc.
-            %% Disable driver_alloc to avoid recursive alloc_util calls
-            %% through enif_mutex_create() in my_creating_mbc().
-	    drv_case(Cfg, concurrent, "+MZe true +MRe false"),
-	    drv_case(Cfg, concurrent, "+MZe true +MRe false +MZas ageffcbf");
-	false ->
-	    {skipped, "No smp"}
-    end.
+    %% Enable test_alloc.
+    %% Disable driver_alloc to avoid recursive alloc_util calls
+    %% through enif_mutex_create() in my_creating_mbc().
+    drv_case(Cfg, concurrent, "+MZe true +MRe false"),
+    drv_case(Cfg, concurrent, "+MZe true +MRe false +MZas ageffcbf"),
+    drv_case(Cfg, concurrent, "+MZe true +MRe false +MZas chaosff").
 
 erts_mmap(Config) when is_list(Config) ->
     case {os:type(), mmsc_flags()} of
@@ -100,10 +96,11 @@ mmsc_flags() ->
 mmsc_flags(Env) ->
     case os:getenv(Env) of
 	false -> false;
-	V -> case string:str(V, "+MMsc") of
-		 0 -> false;
-		 P -> Env ++ "=" ++ string:substr(V, P)
-	     end
+	V ->
+            case string:find(V, "+MMsc") of
+                nomatch -> false;
+                SubStr -> Env ++ "=" ++ SubStr
+            end
     end.
 
 erts_mmap_do(Config, SCO, SCRPM, SCRFSD) ->

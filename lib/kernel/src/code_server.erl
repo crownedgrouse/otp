@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %%
-%% Copyright Ericsson AB 1998-2016. All Rights Reserved.
+%% Copyright Ericsson AB 1998-2020. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -1434,14 +1434,31 @@ all_loaded(Db) ->
 
 -spec error_msg(io:format(), [term()]) -> 'ok'.
 error_msg(Format, Args) ->
-    Msg = {notify,{error, group_leader(), {self(), Format, Args}}},
-    error_logger ! Msg,
+    %% This is equal to calling logger:error/3 which we don't want to
+    %% do from code_server. We don't want to call logger:timestamp()
+    %% either.
+    _ = try
+            logger ! {log,error,Format,Args,
+                      #{pid=>self(),
+                        gl=>group_leader(),
+                        time=>os:system_time(microsecond),
+                        error_logger=>#{tag=>error}}}
+        catch _:_ ->
+                erlang:display({?MODULE,error}),
+                erlang:display({Format,Args})
+        end,
     ok.
 
 -spec info_msg(io:format(), [term()]) -> 'ok'.
 info_msg(Format, Args) ->
-    Msg = {notify,{info_msg, group_leader(), {self(), Format, Args}}},
-    error_logger ! Msg,
+    %% This is equal to calling logger:info/3 which we don't want to
+    %% do from code_server. We don't want to call logger:timestamp()
+    %% either.
+    catch logger ! {log,info,Format,Args,
+                    #{pid=>self(),
+                      gl=>group_leader(),
+                      time=>os:system_time(microsecond),
+                      error_logger=>#{tag=>info_msg}}},
     ok.
 
 objfile_extension() ->

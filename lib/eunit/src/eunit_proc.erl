@@ -628,7 +628,7 @@ io_request({put_chars, M, F, As}, Buf) ->
     try apply(M, F, As) of
 	Chars -> {ok, [Chars | Buf]}
     catch
-	C:T -> {{error, {C,T,erlang:get_stacktrace()}}, Buf}
+	C:T:S -> {{error, {C,T,S}}, Buf}
     end;
 io_request({put_chars, _Enc, Chars}, Buf) ->
     io_request({put_chars, Chars}, Buf);
@@ -643,6 +643,8 @@ io_request({get_line, _Prompt}, Buf) ->
 io_request({get_line, _Enc, _Prompt}, Buf) ->
     {eof, Buf};
 io_request({get_until, _Prompt, _M, _F, _As}, Buf) ->
+    {eof, Buf};
+io_request({get_until, _Enc, _Prompt, _M, _F, _As}, Buf) ->
     {eof, Buf};
 io_request({setopts, _Opts}, Buf) ->
     {ok, Buf};

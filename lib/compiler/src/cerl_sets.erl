@@ -1,7 +1,7 @@
 %%
 %% %CopyrightBegin%
 %% 
-%% Copyright Ericsson AB 2000-2015. All Rights Reserved.
+%% Copyright Ericsson AB 2000-2020. All Rights Reserved.
 %% 
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -204,4 +204,4 @@ fold(F, Init, D) ->
       Set2 :: set(Element).
 
 filter(F, D) ->
-    maps:from_list(lists:filter(fun({K,_}) -> F(K) end, maps:to_list(D))).
+    maps:filter(fun(K,_) -> F(K) end, D).
